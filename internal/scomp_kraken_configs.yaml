@@ -1,0 +1,100 @@
+# internal/scomp_kraken_configs.yaml
+presets:
+
+  viruses:
+    taxon: "Viruses"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+
+  apicomplexa:
+    taxon: "Apicomplexa"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt"
+    debug: true
+
+  retroviridae:
+    taxon: "Retroviridae"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/core_nt"
+
+  flaviviridae:
+    taxon: "Flaviviridae"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+
+  orbivirus:
+    taxon: "Orbivirus"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+
+  pox:
+    taxon: "Poxviridae"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+
+  adenoviridae:
+    taxon: "Adenoviridae"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+
+  coronaviridae:
+    taxon: "Coronaviridae"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+
+  vesiculovirus:
+    taxon: "Vesiculovirus"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+
+  paramyxoviridae:
+    taxon: "Paramyxoviridae"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+
+  poxviridae-host-nt_viruses:
+    taxon: "Poxviridae"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+
+  isav:
+    taxon: "Isavirus salaris"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+    
+  mtb:
+    taxon: "Mycobacterium tuberculosis complex"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/ref_prok_rep_genomes"
+
+  lepto:
+    taxon: "Leptospirales"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/ref_prok_rep_genomes"
+
+  brucella:
+    taxon: "Brucellaceae"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/ref_prok_rep_genomes"
+
+  big:
+    taxon: "big"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt"
+    
+  asfv:
+    taxon: "Asfivirus"
+    kraken_db: "/software/public/databases/kraken/kraken_nt_core"
+    blast_db: "/software/public/databases/BLAST/db/nt_viruses"
+    
+  macos_test:
+    taxon: "Mycobacterium tuberculosis complex"
+    kraken_db: "${HOME}/k2_standard_08gb"
+    blast_db: "${HOME}/blast_databases/ref_prok_rep_genomes"
+    logo: "${HOME}/database/usdalogo.png"
+
+# Default settings that apply to all presets unless overridden
+defaults:
+  logo: "/software/public/databases/usdalogo.png"
+  r1_pattern: "*_R1*.fastq.gz"
+  r2_pattern: "*_R2*.fastq.gz"

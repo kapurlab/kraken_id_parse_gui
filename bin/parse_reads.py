@@ -221,13 +221,8 @@ class ParseReads(Setup):
         
         # First table - use table environment to keep banner and table together
         print(r'\begin{table}[H]', file=tex)
-        
-        # Banner at the top
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
-        print(f'\\includegraphics[scale=1]{{{kraken_banner.banner}}}', file=tex)
-        print(r'\end{center}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
+        print(r'\centering', file=tex)
+        print(f'\\includegraphics[width=\\textwidth]{{{kraken_banner.banner}}}', file=tex)
         
         # First table with matching width
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)

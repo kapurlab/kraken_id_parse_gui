@@ -11,9 +11,8 @@ import textwrap
 import pandas as pd
 import multiprocessing
 multiprocessing.set_start_method('spawn', True)
-import matplotlib.pyplot as plt
-plt.style.use('seaborn-v0_8-colorblind')
-from matplotlib import pyplot as plt
+from file_setup import apply_mpl_style
+plt = apply_mpl_style()
 cmap = plt.get_cmap('coolwarm')
 
 from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
@@ -141,18 +140,14 @@ class Bracken_Pie_Charts:
     def latex(self, build_latex=False):
             tex = build_latex
             print(r'\begin{table}[H]', file=tex)
-            print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
+            print(r'\centering', file=tex)
             if self.FASTA:
                 bracken_pie_banner = Banner("FASTA Identifications")
             else:
                 bracken_pie_banner = Banner("FASTQ Identifications")
-            print(r'\begin{center}', file=tex)
-            print(r'\includegraphics[scale=1]{' + bracken_pie_banner.banner + r'}', file=tex)
-            print(r'\end{center}', file=tex)
-            print(r'\end{adjustbox}', file=tex)
-            print(r'\begin{center}', file=tex)
+            print(r'\includegraphics[width=\textwidth]{' + bracken_pie_banner.banner + r'}', file=tex)
             print(r'\includegraphics[scale=0.8]{' + self.pie_chart + r'}', file=tex)
-            print(r'\end{center}', file=tex)
+            print(r'\\', file=tex)
             print(r'Identified using: \href{https://ccb.jhu.edu/software/kraken2/}{Kraken} and \href{https://ccb.jhu.edu/software/bracken/}{Bracken}', file=tex)
             print(r'\end{table}', file=tex)
 

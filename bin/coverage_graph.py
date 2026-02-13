@@ -11,8 +11,8 @@ import glob
 from collections import Counter
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-plt.style.use('seaborn-v0_8-colorblind')
+from file_setup import apply_mpl_style
+plt = apply_mpl_style()
 from matplotlib import cm, colormaps
 import pysam
 from Bio import SeqIO
@@ -272,26 +272,18 @@ class Coverage_Graph(Setup):
         print(r'\newpage', file=tex)
 
         # Coverage banner
-        print(r'\begin{figure}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
-        print(f'\\includegraphics[scale=1]{{{coverage_banner.banner}}}', file=tex)
-        print(r'\end{center}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-
+        print(r'\begin{figure}[H]', file=tex)
+        print(r'\centering', file=tex)
+        print(f'\\includegraphics[width=\\textwidth]{{{coverage_banner.banner}}}', file=tex)
         # Add coverage graph
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print(f'\\includegraphics[width=\\textwidth]{{{self.output_pdf}}}', file=tex)
-        print(r'\end{center}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
         print(r'\caption{Coverage depth analysis showing read alignment depth across reference sequences.}', file=tex)
         print(r'\end{figure}', file=tex)
 
-        print(r'\vspace{2cm}', file=tex)  # Add more vertical space between figure and table
+        print(r'\vspace{0.5cm}', file=tex)
 
         # Add alignment statistics table
-        print(r'\begin{table}', file=tex)
+        print(r'\begin{table}[H]', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
         print(r'\begin{tabular}{l|r|r|r}', file=tex)
         print(r'\hline', file=tex)

@@ -121,11 +121,8 @@ class FASTQ_Stats(Setup):
     def latex(self, tex):
         blast_banner = Banner("FASTQ Quality")
         print(r'\begin{table}[H]', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
-        print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{center}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
+        print(r'\centering', file=tex)
+        print(r'\includegraphics[width=\textwidth]{' + blast_banner.banner + '}', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
         print(r'\small', file=tex)
         print(r'\begin{tabular}{ l | l | l }', file=tex)
@@ -146,10 +143,8 @@ class FASTQ_Stats(Setup):
             print(f'Average Read Length & {self.R1.avg_len} & N/A \\\\', file=tex)
         
         print(r'\hline', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\vspace{0.1 mm}', file=tex)
         print(r'\end{tabular}', file=tex)
-        print(r'\\', file=tex)
+        print(r'\end{adjustbox}', file=tex)
         print(r'\end{table}', file=tex)
     
     def excel(self, excel_dict):

@@ -85,29 +85,44 @@ class Alignment(Setup):
         self.READ_PAIR_OPTICAL_DUPLICATES = int(dup_metrics_df['READ_PAIR_OPTICAL_DUPLICATES'])
         self.PERCENT_DUPLICATION	 = float(dup_metrics_df['PERCENT_DUPLICATION'])
         os.system(f'samtools index {nodup_bamfile}')
-        chrom_ranges = open("chrom_ranges.txt", 'w')
-        for record in SeqIO.parse(reference, "fasta"):
-            chrom = record.id
-            total_len = len(record.seq)
-            min_number = 0
-            step = 100000
-            if step < total_len:
-                for chunk in range(min_number, total_len, step)[1:]:
-                    print("{}:{}-{}".format(chrom, min_number, chunk), file=chrom_ranges)
-                    min_number = chunk
-            print("{}:{}-{}".format(chrom, min_number, total_len), file=chrom_ranges)
-        chrom_ranges.close()
-        os.system(f'freebayes-parallel chrom_ranges.txt 8 -E -1 -e 1 -u --strict-vcf -f {reference} {nodup_bamfile} > {unfiltered_hapall}')
-        write_fix = open(mapfix_hapall, 'w+')
-        with open(unfiltered_hapall, 'r') as unfiltered:
-            for line in unfiltered:
-                line = line.strip()
-                new_line = re.sub(r';MQM=', r';MQ=', line)
-                new_line = re.sub(r'ID=MQM,', r'ID=MQ,', new_line)
-                print(new_line, file=write_fix)
-            write_fix.close()
-        # remove clearly poor positions
-        os.system(f'vcffilter -f "QUAL > 20" {mapfix_hapall} > {filtered_hapall}')
+        if self.platform == 'ont':
+            # ONT: bcftools mpileup | bcftools call (matches vSNP3 ONT pipeline)
+            os.system(f'bcftools mpileup --threads 16 -Ou -f {reference} {nodup_bamfile} | bcftools call --threads 16 -mv -v -Ov -o {unfiltered_hapall}')
+            os.system(f'vcffilter -f "QUAL > 20" {unfiltered_hapall} > temp_filtered.vcf')
+            os.system(f'vcftools --vcf temp_filtered.vcf --remove-indels --recode --recode-INFO-all --out temp_noindel')
+            if os.path.exists('temp_noindel.recode.vcf'):
+                shutil.move('temp_noindel.recode.vcf', filtered_hapall)
+            else:
+                shutil.move('temp_filtered.vcf', filtered_hapall)
+            # Clean up temp files
+            for f in glob.glob('temp_filtered*') + glob.glob('temp_noindel*'):
+                if os.path.exists(f):
+                    os.remove(f)
+        else:
+            # Illumina: freebayes-parallel
+            chrom_ranges = open("chrom_ranges.txt", 'w')
+            for record in SeqIO.parse(reference, "fasta"):
+                chrom = record.id
+                total_len = len(record.seq)
+                min_number = 0
+                step = 100000
+                if step < total_len:
+                    for chunk in range(min_number, total_len, step)[1:]:
+                        print("{}:{}-{}".format(chrom, min_number, chunk), file=chrom_ranges)
+                        min_number = chunk
+                print("{}:{}-{}".format(chrom, min_number, total_len), file=chrom_ranges)
+            chrom_ranges.close()
+            os.system(f'freebayes-parallel chrom_ranges.txt 8 -E -1 -e 1 -u --strict-vcf -f {reference} {nodup_bamfile} > {unfiltered_hapall}')
+            write_fix = open(mapfix_hapall, 'w+')
+            with open(unfiltered_hapall, 'r') as unfiltered:
+                for line in unfiltered:
+                    line = line.strip()
+                    new_line = re.sub(r';MQM=', r';MQ=', line)
+                    new_line = re.sub(r'ID=MQM,', r'ID=MQ,', new_line)
+                    print(new_line, file=write_fix)
+                write_fix.close()
+            # remove clearly poor positions
+            os.system(f'vcffilter -f "QUAL > 20" {mapfix_hapall} > {filtered_hapall}')
 
         # ONT QUAL normalization: add +100 to compensate for lower nanopore base quality
         if self.platform == 'ont':

@@ -233,7 +233,9 @@ The pipeline automatically detects the sequencing platform by sampling the first
 |-----------|----------|-----|
 | Assembler | SPAdes | Flye (`--nano-raw`) |
 | Aligner | BWA-MEM | minimap2 (`-x map-ont`) |
+| VCF Caller | freebayes-parallel | bcftools mpileup \| bcftools call |
 | VCF QUAL | As-is | +100 normalization |
+| Indels | Retained | Removed (`vcftools --remove-indels`) |
 
 Override with `--platform illumina` or `--platform ont` to skip auto-detection.
 
@@ -492,6 +494,8 @@ REPO_ROOT="${HOME}/git/gitlab/kraken_id_parse"
 - **Platform auto-detection** — reads > 701 bp automatically trigger ONT mode
 - **Flye assembler** for ONT de novo assembly (`--nano-raw`)
 - **minimap2 aligner** for ONT read alignment (`-x map-ont`)
+- **bcftools mpileup | bcftools call** for ONT variant calling (matches vSNP3; freebayes retained for Illumina)
+- **Indel removal** via `vcftools --remove-indels` for ONT VCFs (matches vSNP3)
 - **VCF QUAL normalization** — +100 to all QUAL scores for ONT reads (compensates for lower nanopore base quality)
 - **`--platform` CLI option** — override auto-detection with `illumina`, `ont`, or `auto`
 - **Platform-aware PDF report** — methodology appendix dynamically references correct tools
@@ -523,7 +527,7 @@ REPO_ROOT="${HOME}/git/gitlab/kraken_id_parse"
 - Preset configuration system with `run_with_config.py` and `--override` support
 - SLURM job script with preset integration
 - Preflight tool checks in GUI
-- `minimap2` and `flye` added to conda environment
+- `minimap2`, `flye`, `bcftools`, and `vcftools` added to conda environment
 
 ## v0.1.0
 - Initial release

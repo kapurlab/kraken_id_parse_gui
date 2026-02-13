@@ -24,6 +24,32 @@ try:
 except ImportError:
     HAS_SVG_SUPPORT = False
 
+
+def apply_mpl_style(style_candidates: Optional[List[str]] = None):
+    """
+    Apply a matplotlib style with graceful fallback across versions.
+    Returns the pyplot module for convenience.
+    """
+    import matplotlib
+    # Force non-GUI backend on macOS to avoid AppKit font crashes
+    if not os.environ.get("MPLBACKEND"):
+        matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt  # local import after backend selection
+    candidates = style_candidates or [
+        'seaborn-v0_8-colorblind',
+        'seaborn-colorblind',
+        'seaborn-v0_8',
+        'seaborn',
+        'ggplot',
+    ]
+    for style in candidates:
+        try:
+            plt.style.use(style)
+            break
+        except OSError:
+            continue
+    return plt
+
 class bcolors:
     """ANSI color codes for terminal output formatting"""
     PURPLE = '\033[95m'
@@ -426,10 +452,21 @@ class Latex_Report:
         """Finalize and compile the LaTeX document"""
         print(r'\end{document}', file=self.tex)
         self.tex.close()
-        
+
         # Run pdflatex twice for proper rendering
-        for _ in range(2):
-            os.system(f'pdflatex -interaction=nonstopmode {self.tex_file} > /dev/null 2>&1') #> /dev/null 2>&1
+        log_file = self.tex_file.replace('.tex', '_pdflatex.log')
+        for i in range(2):
+            ret = os.system(f'pdflatex -interaction=nonstopmode {self.tex_file} > {log_file} 2>&1')
+            if ret != 0:
+                print(f"  pdflatex pass {i+1} returned exit code {ret}")
+        # Print any errors/warnings from the log
+        try:
+            with open(log_file, 'r') as f:
+                for line in f:
+                    if any(kw in line for kw in ['!', 'Error', 'Warning', 'Missing']):
+                        print(f"  pdflatex: {line.rstrip()}")
+        except FileNotFoundError:
+            pass
 
 class Excel_Stats:
     """Generate Excel statistics reports"""

@@ -214,7 +214,8 @@ def main():
         
         # Handle special parameters that need different treatment
         special_params = {
-            'r1_pattern', 'r2_pattern', 'debug', 'specific'
+            'r1_pattern', 'r2_pattern', 'debug', 'specific',
+            'database_root', 'keep_extracted_reads'
         }
         
         # Handle file patterns differently - use the actual first file instead of pattern
@@ -233,6 +234,19 @@ def main():
             cmd.append('-d')
             if verbose:
                 print("Added debug flag (-d)")
+
+        # Handle keep_extracted_reads flag
+        if run_config.get('keep_extracted_reads'):
+            cmd.append('--keep-extracted-reads')
+            if verbose:
+                print("Added --keep-extracted-reads flag")
+
+        # Handle database_root — pass through to kraken_id_parse.py
+        db_root = run_config.get('database_root', '')
+        if db_root:
+            cmd.extend(['--database-root', str(db_root)])
+            if verbose:
+                print(f"Added --database-root {db_root}")
         
         # Handle other parameters
         for key, value in run_config.items():

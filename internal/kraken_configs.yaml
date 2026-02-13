@@ -113,3 +113,10 @@ defaults:
   logo: "/project/bioinformatic_databases/usdalogo.png"
   r1_pattern: "*_R1*.fastq.gz"
   r2_pattern: "*_R2*.fastq.gz"
+  # database_root: Set this to the directory containing your BLAST databases.
+  # When set, the pipeline auto-resolves the correct narrow DB from the taxon name.
+  # Example: database_root: "/path/to/blast/databases"
+  # This means you can omit blast_db from individual presets — the pipeline will
+  # pick nt_viruses for viral taxa, ref_prok_rep_genomes for bacterial, etc.
+  # Per-preset blast_db values override auto-resolution.
+  # database_root: ""

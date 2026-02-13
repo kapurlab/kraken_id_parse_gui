@@ -167,7 +167,8 @@ The reports can include your organization's logo. Provide an image as a .png fil
 
 ```
 kraken_id_parse.py [-h] [-r1 FASTQ_R1] [-r2 FASTQ_R2] [-l LOGO]
-                   -t TAXON -k KRAKEN_DB [-b BLAST_DB] [-s SPECIFIC]
+                   -t TAXON -k KRAKEN_DB [-b BLAST_DB]
+                   [--database-root DIR] [-s SPECIFIC]
                    [--keep-extracted-reads] [-d] [-v]
 
 Required:
@@ -177,13 +178,44 @@ Required:
 
 Optional:
   -r2, --read2          R2 FASTQ file (paired-end)
-  -b,  --blast_db       BLAST database path (default: nt)
+  -b,  --blast_db       BLAST database path (overrides auto-resolution)
+  --database-root       Root dir containing BLAST databases (enables auto-resolution)
   -l,  --logo           Organization logo PNG for report header
   -s,  --specific       Custom taxon-specific function name
   --keep-extracted-reads  Keep taxon-filtered FASTQ files (default: remove)
   -d,  --debug          Keep all intermediate/temp files
   -v,  --version        Show version
 ```
+
+## Automatic BLAST Database Resolution
+
+When `--database-root` is provided (or set in `~/.kraken_id_parse.yaml`), the pipeline automatically selects the appropriate BLAST database based on the taxon name:
+
+| Taxon Category | BLAST Database |
+|----------------|----------------|
+| Viral families & genera (Orbivirus, Flaviviridae, etc.) | `nt_viruses` |
+| Bacterial (Mycobacterium, Brucellaceae, Leptospirales) | `ref_prok_rep_genomes` |
+| Protozoan/Eukaryotic (Apicomplexa) | `nt` |
+| Unknown taxa with "virus"/"viridae" in name | `nt_viruses` |
+| Fallback | `nt` |
+
+### Setup
+
+Create `~/.kraken_id_parse.yaml`:
+```yaml
+database_root: "/path/to/blast/databases"
+```
+
+Then simply run:
+```bash
+${REPO_ROOT}/bin/kraken_id_parse.py \
+  -r1 *_R1*fastq.gz -r2 *_R2*fastq.gz \
+  --taxon Orbivirus \
+  --kraken_db /path/to/kraken_db
+# BLAST database auto-resolved to: /path/to/blast/databases/nt_viruses
+```
+
+Use `-b` to override auto-resolution for a specific run.
 
 There are two main ways to run the pipeline:
 

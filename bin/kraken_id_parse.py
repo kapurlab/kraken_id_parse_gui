@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 import os
 import shutil
@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 import argparse
 import textwrap
+import yaml
 import pandas as pd
 from collections import OrderedDict, defaultdict
 from random import randint
@@ -20,6 +21,118 @@ from time import sleep
 from Bio import SeqIO
 
 from file_setup import bcolors, Banner, Latex_Report, Excel_Stats
+
+
+# ---------------------------------------------------------------------------
+# Taxon → BLAST database mapping for automatic database resolution
+# ---------------------------------------------------------------------------
+# Categories: viral taxa use nt_viruses, bacterial use ref_prok_rep_genomes,
+# protozoan/other eukaryotic use nt.  Fallback is nt (full).
+TAXON_DB_MAP = {
+    # Viral families / genera
+    "Orbivirus":        "nt_viruses",
+    "Flaviviridae":     "nt_viruses",
+    "Coronaviridae":    "nt_viruses",
+    "Retroviridae":     "nt_viruses",
+    "Poxviridae":       "nt_viruses",
+    "Adenoviridae":     "nt_viruses",
+    "Vesiculovirus":    "nt_viruses",
+    "Paramyxoviridae":  "nt_viruses",
+    "Metapneumovirus":  "nt_viruses",
+    "Asfivirus":        "nt_viruses",
+    "Arteriviridae":    "nt_viruses",
+    "Novirhabdovirus":  "nt_viruses",
+    "Isavirus salaris": "nt_viruses",
+    "Viruses":          "nt_viruses",
+    "Bluetongue virus": "nt_viruses",
+    "Epizootic hemorrhagic disease": "nt_viruses",
+    # Bacterial
+    "Mycobacterium tuberculosis complex": "ref_prok_rep_genomes",
+    "Mycobacterium bovis":                "ref_prok_rep_genomes",
+    "Brucellaceae":                       "ref_prok_rep_genomes",
+    "Leptospirales":                      "ref_prok_rep_genomes",
+    # Protozoan / eukaryotic
+    "Apicomplexa":      "nt",
+}
+
+# Broad category keywords as fallback when exact taxon isn't in the map
+TAXON_CATEGORY_HINTS = [
+    # (keyword_in_taxon,  db_name)
+    ("virus",   "nt_viruses"),
+    ("viridae", "nt_viruses"),
+    ("virales", "nt_viruses"),
+    ("phage",   "nt_viruses"),
+]
+
+
+def resolve_blast_db(taxon: str, database_root: str = None, explicit_db: str = None) -> str:
+    """Resolve the BLAST database path from taxon name and optional database_root.
+
+    Priority:
+      1. If ``explicit_db`` is a real path (absolute) → use it verbatim.
+      2. Look up taxon in TAXON_DB_MAP (exact match, then case-insensitive).
+      3. Try keyword hints (viral family suffixes).
+      4. Fall back to "nt".
+
+    If ``database_root`` is provided, the resolved DB name is joined as
+    ``database_root / db_name``.  Otherwise the bare name is returned
+    (user is expected to have it on BLASTDB path or give an absolute path).
+    """
+    # 1. Explicit absolute path — pass through
+    if explicit_db and explicit_db != "nt":
+        if os.path.isabs(explicit_db):
+            return explicit_db
+
+    # 2. Exact lookup
+    db_name = TAXON_DB_MAP.get(taxon)
+
+    # 3. Case-insensitive lookup
+    if db_name is None:
+        for key, val in TAXON_DB_MAP.items():
+            if key.lower() == taxon.lower():
+                db_name = val
+                break
+
+    # 4. Keyword hints
+    if db_name is None:
+        taxon_lower = taxon.lower()
+        for keyword, val in TAXON_CATEGORY_HINTS:
+            if keyword in taxon_lower:
+                db_name = val
+                break
+
+    # 5. Fallback
+    if db_name is None:
+        db_name = "nt"
+
+    # Resolve against database_root if provided
+    if database_root:
+        candidate = os.path.join(database_root, db_name)
+        # Check for BLAST DB index files (e.g. nt_viruses.nal or nt_viruses.00.nhr)
+        if glob.glob(f"{candidate}*"):
+            return candidate
+        else:
+            print(f"{bcolors.YELLOW}Warning: No BLAST index files found at "
+                  f"{candidate}* — falling back to bare name '{db_name}'{bcolors.ENDC}")
+
+    # If an explicit non-absolute value was given (like a preset db name), prefer it
+    if explicit_db and explicit_db != "nt":
+        return explicit_db
+
+    return db_name
+
+
+def load_database_root() -> str:
+    """Load database_root from ~/.kraken_id_parse.yaml if it exists."""
+    config_path = os.path.expanduser("~/.kraken_id_parse.yaml")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+            return cfg.get('database_root', '')
+        except Exception as e:
+            print(f"Warning: Could not read {config_path}: {e}")
+    return ''
 
 from fastq_stats_seqkit import FASTQ_Stats
 from alignment_vcf import Alignment
@@ -54,13 +167,29 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     parser.add_argument('-l', '--logo', action='store', dest='logo', required=False, help='Logo for the Latex PDF report')
     parser.add_argument("-t", "--taxon", action='store', dest='taxon', help='Target Taxon')
     parser.add_argument("-k", "--kraken_db", action='store', dest='kraken_db', help='Specify Kraken db to use')
-    parser.add_argument("-b", "--blast_db", action='store', dest='blast_db', default="nt", help='Specify BLAST db to use')
+    parser.add_argument("-b", "--blast_db", action='store', dest='blast_db', default="nt", help='Specify BLAST db to use (overrides auto-resolution)')
+    parser.add_argument("--database-root", action='store', dest='database_root', default=None,
+                        help='Root directory containing BLAST databases (enables auto-resolution from taxon name)')
     parser.add_argument("-s", "--specific", action='store', dest='specific', default=None, help='Specify custom script/function for the target being used.  Often just default to the taxon name')
     parser.add_argument('-d', '--debug', action='store_true', dest='debug', default=False, help='keep temp file')
     parser.add_argument('--keep-extracted-reads', action='store_true', dest='keep_extracted_reads', default=False, help='Keep taxon-extracted FASTQ files (default: remove to save space)')
     parser.add_argument('-v', '--version', action='version', version=f'{os.path.basename(__file__)}: version {__version__}')
     args = parser.parse_args()
-    
+
+    # --- Auto-resolve BLAST database from taxon ---
+    database_root = args.database_root or load_database_root()
+    user_gave_explicit_blast = (args.blast_db != "nt")  # user explicitly set -b
+    if args.taxon and not user_gave_explicit_blast:
+        resolved = resolve_blast_db(
+            taxon=args.taxon,
+            database_root=database_root if database_root else None,
+            explicit_db=args.blast_db
+        )
+        if resolved != args.blast_db:
+            print(f"{bcolors.BLUE}Auto-resolved BLAST database: {resolved} "
+                  f"(from taxon '{args.taxon}'){bcolors.ENDC}")
+            args.blast_db = resolved
+
     print(f'\n{os.path.basename(__file__)} SET ARGUMENTS:')
     print(args)
     print("\n")

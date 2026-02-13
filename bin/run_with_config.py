@@ -129,6 +129,13 @@ def main():
             if verbose and isinstance(value, str) and expanded != value:
                 print(f"  {key}: {value} -> {expanded}")
             run_config[key] = expanded
+
+        # Drop logo if it doesn't exist to avoid LaTeX failures
+        logo_path = run_config.get("logo")
+        if isinstance(logo_path, str) and logo_path and not os.path.exists(logo_path):
+            if verbose:
+                print(f"Logo path not found, removing: {logo_path}")
+            run_config.pop("logo", None)
         
         if verbose:
             print("=== Final configuration ===")

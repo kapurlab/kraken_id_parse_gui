@@ -18,9 +18,9 @@ Reads can be extracted by providing a taxonomical name using the `--taxon` optio
 Upon completion, Excel and PDF files are created to provide summaries and reporting.
 
 ## Workflow
-1. Kraken
+1. Kraken2 classification and Bracken abundance estimation
 2. Reads parsed on taxon
-3. Parsed reads assembled
+3. Parsed reads assembled with SPAdes
 4. Assembly identified with BLAST
 5. Download FASTAs from BLAST findings
 6. Coverage graph on downloaded FASTAs
@@ -32,14 +32,87 @@ Upon completion, Excel and PDF files are created to provide summaries and report
 10. Alignment using top BLAST results
 11. Merged VCF to the top BLAST results as the final consensus
 12. Make final coverage graph
+13. Generate PDF report with methodology appendix
+
+## Output Files
+
+After a successful run, the output directory contains:
+
+| File | Description |
+|------|-------------|
+| `*_report.pdf` | PDF report — FASTQ quality, Kraken/Bracken pie chart, classification tables, assembly stats, BLAST identification, coverage graphs, methodology appendix |
+| `*_stats.xlsx` | Excel spreadsheet with summary statistics |
+| `*_denovo.fasta` | *De novo* SPAdes assembly of extracted reads |
+| `*_reference_guided.fasta` | Consensus sequence from reference-guided assembly |
+| `*_blast_summary.txt` | BLAST results summary (de novo assembly) |
+| `consensus_blast_summary.txt` | BLAST results summary (consensus assembly) |
+| `CAUTION_SITES.xlsx` | Ambiguous/heterozygous sites flagged during consensus calling |
+| `kraken/` | Kraken2 report, Bracken species estimates, Krona interactive HTML visualization |
+
+Intermediate files (section banners, coverage graph PDFs, LaTeX source, pie chart PNG, raw BLAST output) are automatically cleaned up after the PDF report is compiled.
+
+Use `--keep-extracted-reads` to preserve the taxon-filtered FASTQ files (default: removed to save space).
 
 # Installation
 
-Follow instructions at [kraken_id_parse/conda_setup/conda_setup.md](./conda_setup/conda_setup.md)
+## Quick Start
 
 ```bash
+# 1. Clone the repo
+git clone https://github.com/kapurlab/kraken_id_parse_gui.git
+cd kraken_id_parse_gui
+
+# 2. Create conda environment
+mamba env create -f conda_setup/environment.yml
+mamba activate kraken_id_parse
+
+# 3. Install LaTeX (required for PDF report generation — see below)
+
+# 4. Download Kraken and BLAST databases (see Prerequisites below)
+
+# 5. Run
+export REPO_ROOT="$(pwd)"
+${REPO_ROOT}/bin/kraken_id_parse.py \
+  -r1 *_R1*fastq.gz -r2 *_R2*fastq.gz \
+  --taxon Orbivirus \
+  --kraken_db /path/to/kraken_db \
+  --blast_db /path/to/blast_db
+```
+
+## Conda Environment
+
+Follow detailed instructions at [conda_setup/conda_setup.md](./conda_setup/conda_setup.md)
+
+```bash
+mamba env create -f conda_setup/environment.yml
 mamba activate kraken_id_parse
 ```
+
+## LaTeX (pdflatex)
+
+The pipeline requires `pdflatex` to compile the PDF report. This is **not** included in the conda environment and must be installed separately.
+
+**macOS:**
+```bash
+# Full MacTeX (recommended, ~3.5 GB)
+brew install --cask mactex-no-gui
+
+# Or TinyTeX (lighter, ~150 MB — then install required packages)
+curl -sL "https://yihui.org/tinytex/install-bin-unix.sh" | sh
+tlmgr install adjustbox collectbox fancyhdr grfext float xcolor helvet psnfss
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get install texlive-latex-base texlive-latex-extra texlive-fonts-recommended
+```
+
+**Verify installation:**
+```bash
+which pdflatex
+pdflatex --version
+```
+
 ## Prerequisites
 
 ### Kraken Database
@@ -89,6 +162,28 @@ update_blastdb.pl --decompress ref_prok_rep_genomes
 The reports can include your organization's logo. Provide an image as a .png file for enhanced report presentation.
 
 # Running the Pipeline
+
+## Command-Line Options
+
+```
+kraken_id_parse.py [-h] [-r1 FASTQ_R1] [-r2 FASTQ_R2] [-l LOGO]
+                   -t TAXON -k KRAKEN_DB [-b BLAST_DB] [-s SPECIFIC]
+                   [--keep-extracted-reads] [-d] [-v]
+
+Required:
+  -r1, --read1          R1 FASTQ file (or single read)
+  -t,  --taxon          Target taxon name (e.g., "Orbivirus", "Flaviviridae")
+  -k,  --kraken_db      Path to Kraken2 database directory
+
+Optional:
+  -r2, --read2          R2 FASTQ file (paired-end)
+  -b,  --blast_db       BLAST database path (default: nt)
+  -l,  --logo           Organization logo PNG for report header
+  -s,  --specific       Custom taxon-specific function name
+  --keep-extracted-reads  Keep taxon-filtered FASTQ files (default: remove)
+  -d,  --debug          Keep all intermediate/temp files
+  -v,  --version        Show version
+```
 
 There are two main ways to run the pipeline:
 

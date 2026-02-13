@@ -22,10 +22,10 @@ from zero_coverage import Zero_Coverage
 
 
 class Alignment(Setup):
-    ''' 
+    '''
     '''
 
-    def __init__(self, FASTQ_R1=None, FASTQ_R2=None, reference=None, gbk=None, skip_assembly=None, debug=False):
+    def __init__(self, FASTQ_R1=None, FASTQ_R2=None, reference=None, gbk=None, skip_assembly=None, debug=False, platform='illumina'):
         '''
         Start at class call
         '''
@@ -34,6 +34,7 @@ class Alignment(Setup):
         self.reference = self.FASTA
         self.gbk = gbk
         self.skip_assembly = skip_assembly
+        self.platform = platform
         self.reference_name = re.sub('[_.].*', '', os.path.basename(reference))
 
     def run(self,):
@@ -57,11 +58,19 @@ class Alignment(Setup):
         zero_coverage_vcf = f'{sample_name}_zc.vcf'
         os.system(f'samtools faidx {reference}')
         os.system(f'picard CreateSequenceDictionary REFERENCE={reference} OUTPUT={reference.rsplit(".", 1)[0]}.dict 2> /dev/null')
-        os.system(f'bwa index {reference} 2> /dev/null')
-        if self.paired:
-            os.system(f'bwa mem -M -R "@RG\\tID:{sample_name}\\tSM:{sample_name}\\tPL:ILLUMINA\\tPI:250" -t 8 {reference} {self.FASTQ_R1} {self.FASTQ_R2} > {samfile}')
+        if self.platform == 'ont':
+            # ONT: minimap2 alignment (single-end only)
+            pl_tag = 'ONT'
+            rg_string = f'@RG\\tID:{sample_name}\\tSM:{sample_name}\\tPL:{pl_tag}\\tPI:250'
+            os.system(f'minimap2 -a -x map-ont -R "{rg_string}" -t 8 {reference} {self.FASTQ_R1} > {samfile}')
         else:
-            os.system(f'bwa mem -M -R "@RG\\tID:{sample_name}\\tSM:{sample_name}\\tPL:ILLUMINA\\tPI:250" -t 8 {reference} {self.FASTQ_R1} > {samfile}')
+            # Illumina: BWA-MEM alignment
+            pl_tag = 'ILLUMINA'
+            os.system(f'bwa index {reference} 2> /dev/null')
+            if self.paired:
+                os.system(f'bwa mem -M -R "@RG\\tID:{sample_name}\\tSM:{sample_name}\\tPL:{pl_tag}\\tPI:250" -t 8 {reference} {self.FASTQ_R1} {self.FASTQ_R2} > {samfile}')
+            else:
+                os.system(f'bwa mem -M -R "@RG\\tID:{sample_name}\\tSM:{sample_name}\\tPL:{pl_tag}\\tPI:250" -t 8 {reference} {self.FASTQ_R1} > {samfile}')
         os.system(f'samtools view -Sb {samfile} -o {all_bamfile}')
         os.system(f'samtools sort {all_bamfile} -o {sorted_bamfile}')
         os.system(f'samtools index {sorted_bamfile}')
@@ -100,6 +109,24 @@ class Alignment(Setup):
         # remove clearly poor positions
         os.system(f'vcffilter -f "QUAL > 20" {mapfix_hapall} > {filtered_hapall}')
 
+        # ONT QUAL normalization: add +100 to compensate for lower nanopore base quality
+        if self.platform == 'ont':
+            print("Applying ONT QUAL normalization (+100)...")
+            qual_adjusted = filtered_hapall + '.tmp'
+            with open(filtered_hapall, 'r') as fin, open(qual_adjusted, 'w') as fout:
+                for line in fin:
+                    if line.startswith('#'):
+                        fout.write(line)
+                    else:
+                        fields = line.split('\t')
+                        if len(fields) >= 6:
+                            try:
+                                fields[5] = str(float(fields[5]) + 100)
+                            except ValueError:
+                                pass  # keep original if QUAL is '.'
+                        fout.write('\t'.join(fields))
+            os.replace(qual_adjusted, filtered_hapall)
+
         unmapped_dir = 'unmapped_reads'
         if not os.path.exists(unmapped_dir):
             os.makedirs(unmapped_dir)
@@ -112,18 +139,22 @@ class Alignment(Setup):
             self.unmapped_read1 = f'{self.cwd}/{unmapped_dir}/{unmapped_read1}.gz'
             self.unmapped_read2 = f'{self.cwd}/{unmapped_dir}/{unmapped_read2}.gz'
             self.unmapped_read_list = [self.unmapped_read1, self.unmapped_read2]
-            if not self.skip_assembly:
+            if not self.skip_assembly and self.platform != 'ont':
                 assemble = Assemble(FASTQ_R1=self.unmapped_read1, FASTQ_R2=self.unmapped_read2, debug=True)
+            elif self.platform == 'ont':
+                print("Skipping unmapped read assembly in ONT mode")
         else:
             os.system(f'samtools fastq -f4 -0 {unmapped_read} --reference {reference} --threads 8 {nodup_bamfile} 2> /dev/null' )
             os.system(f'pigz {unmapped_read}')
             shutil.move(f'{unmapped_read}.gz', unmapped_dir)
             self.unmapped_read = f'{self.cwd}/{unmapped_dir}/{unmapped_read}.gz'
             self.unmapped_read_list = [self.unmapped_read]
-            if not self.skip_assembly:
+            if not self.skip_assembly and self.platform != 'ont':
                 assemble = Assemble(FASTQ_R1=self.unmapped_read, debug=True)
+            elif self.platform == 'ont':
+                print("Skipping unmapped read assembly in ONT mode")
 
-        if not self.skip_assembly:
+        if not self.skip_assembly and self.platform != 'ont':
             assemble.run()
             try:
                 shutil.move(assemble.FASTA, f'{assemble.fastq_name}_unmapped.fasta')

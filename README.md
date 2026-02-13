@@ -20,19 +20,20 @@ Upon completion, Excel and PDF files are created to provide summaries and report
 ## Workflow
 1. Kraken2 classification and Bracken abundance estimation
 2. Reads parsed on taxon
-3. Parsed reads assembled with SPAdes
-4. Assembly identified with BLAST
-5. Download FASTAs from BLAST findings
-6. Coverage graph on downloaded FASTAs
-7. If available continue with taxon specific workflow:
+3. **Platform auto-detection** — reads > 701 bp → ONT mode; otherwise Illumina
+4. Parsed reads assembled with SPAdes (Illumina) or Flye (ONT)
+5. Assembly identified with BLAST
+6. Download FASTAs from BLAST findings (with **local reference cache**)
+7. Coverage graph on downloaded FASTAs (BWA for Illumina, minimap2 for ONT)
+8. If available continue with taxon specific workflow:
    - If Orbivirus, check BLAST coverage stats as "bluetongue virus" or "epizootic hemorrhagic disease"
      - Order by segment and make coverage graph
-8. Reference guided assembly using the original FASTQ files
-9. BLAST reference guided assembly
-10. Alignment using top BLAST results
-11. Merged VCF to the top BLAST results as the final consensus
-12. Make final coverage graph
-13. Generate PDF report with methodology appendix
+9. Reference guided assembly using the original FASTQ files
+10. BLAST reference guided assembly
+11. Alignment using top BLAST results
+12. Merged VCF to the top BLAST results as the final consensus
+13. Make final coverage graph
+14. Generate PDF report with platform-aware methodology appendix
 
 ## Output Files
 
@@ -168,8 +169,9 @@ The reports can include your organization's logo. Provide an image as a .png fil
 ```
 kraken_id_parse.py [-h] [-r1 FASTQ_R1] [-r2 FASTQ_R2] [-l LOGO]
                    -t TAXON -k KRAKEN_DB [-b BLAST_DB]
-                   [--database-root DIR] [-s SPECIFIC]
-                   [--keep-extracted-reads] [-d] [-v]
+                   [--database-root DIR] [--reference-cache DIR]
+                   [--platform {illumina,ont,auto}]
+                   [-s SPECIFIC] [--keep-extracted-reads] [-d] [-v]
 
 Required:
   -r1, --read1          R1 FASTQ file (or single read)
@@ -180,6 +182,8 @@ Optional:
   -r2, --read2          R2 FASTQ file (paired-end)
   -b,  --blast_db       BLAST database path (overrides auto-resolution)
   --database-root       Root dir containing BLAST databases (enables auto-resolution)
+  --reference-cache     Directory to cache downloaded NCBI reference FASTAs
+  --platform            Sequencing platform: illumina, ont, or auto (default: auto)
   -l,  --logo           Organization logo PNG for report header
   -s,  --specific       Custom taxon-specific function name
   --keep-extracted-reads  Keep taxon-filtered FASTQ files (default: remove)
@@ -204,6 +208,7 @@ When `--database-root` is provided (or set in `~/.kraken_id_parse.yaml`), the pi
 Create `~/.kraken_id_parse.yaml`:
 ```yaml
 database_root: "/path/to/blast/databases"
+reference_cache: "/path/to/reference_cache"
 ```
 
 Then simply run:
@@ -216,6 +221,44 @@ ${REPO_ROOT}/bin/kraken_id_parse.py \
 ```
 
 Use `-b` to override auto-resolution for a specific run.
+
+## Platform Auto-Detection (Illumina / ONT)
+
+The pipeline automatically detects the sequencing platform by sampling the first 100 reads from the R1 FASTQ file:
+
+- **Reads > 701 bp** → ONT mode (minimap2 + Flye)
+- **Reads ≤ 701 bp** → Illumina mode (BWA + SPAdes)
+
+| Component | Illumina | ONT |
+|-----------|----------|-----|
+| Assembler | SPAdes | Flye (`--nano-raw`) |
+| Aligner | BWA-MEM | minimap2 (`-x map-ont`) |
+| VCF QUAL | As-is | +100 normalization |
+
+Override with `--platform illumina` or `--platform ont` to skip auto-detection.
+
+## Local Reference Cache
+
+When `--reference-cache` is provided (or set in `~/.kraken_id_parse.yaml`), downloaded NCBI reference FASTAs are cached locally. Subsequent runs reuse cached files instead of re-downloading, which significantly speeds up repeated analyses on the same taxa.
+
+```bash
+# First run — downloads and caches references
+${REPO_ROOT}/bin/kraken_id_parse.py \
+  -r1 reads_R1.fastq.gz -r2 reads_R2.fastq.gz \
+  --taxon Orbivirus --kraken_db /path/to/db \
+  --reference-cache /path/to/cache
+
+# Second run — prints "Cache hit" and skips downloads
+${REPO_ROOT}/bin/kraken_id_parse.py \
+  -r1 reads_R1.fastq.gz -r2 reads_R2.fastq.gz \
+  --taxon Orbivirus --kraken_db /path/to/db \
+  --reference-cache /path/to/cache
+```
+
+Or set it permanently in `~/.kraken_id_parse.yaml`:
+```yaml
+reference_cache: "/path/to/reference_cache"
+```
 
 There are two main ways to run the pipeline:
 
@@ -440,3 +483,54 @@ If needed, you can manually set REPO_ROOT in the SLURM script:
 ```bash
 REPO_ROOT="${HOME}/git/gitlab/kraken_id_parse"
 ```
+
+# Changelog
+
+## v0.2.0
+
+### ONT / MinION Long-Read Support
+- **Platform auto-detection** — reads > 701 bp automatically trigger ONT mode
+- **Flye assembler** for ONT de novo assembly (`--nano-raw`)
+- **minimap2 aligner** for ONT read alignment (`-x map-ont`)
+- **VCF QUAL normalization** — +100 to all QUAL scores for ONT reads (compensates for lower nanopore base quality)
+- **`--platform` CLI option** — override auto-detection with `illumina`, `ont`, or `auto`
+- **Platform-aware PDF report** — methodology appendix dynamically references correct tools
+
+### Local Reference Cache
+- **`--reference-cache` CLI option** — cache downloaded NCBI reference FASTAs locally
+- **`~/.kraken_id_parse.yaml` support** — set `reference_cache` for persistent configuration
+- Cache hit/miss logging — "Cache hit: {accession}" when a cached reference is reused
+- Zero-byte or missing cached files treated as cache miss
+
+### BLAST Database Auto-Resolution
+- **`--database-root` CLI option** — automatically selects the appropriate BLAST database based on taxon name
+- **`~/.kraken_id_parse.yaml` support** — set `database_root` for persistent configuration
+- Taxon-to-database mapping: viral → `nt_viruses`, bacterial → `ref_prok_rep_genomes`, fallback → `nt`
+
+### PDF Report Enhancements
+- Methodology appendix with detailed pipeline description
+- FASTQ quality statistics section
+- Kraken/Bracken pie chart visualization
+- Automatic cleanup of intermediate LaTeX and image files
+- `--keep-extracted-reads` option to preserve taxon-filtered FASTQs
+
+### Bug Fixes
+- Fixed `coverage_graph.py` crash when R2 is None (single-end reads)
+- Fixed LaTeX report rendering — all sections now compile correctly
+- Skip missing logo path to avoid LaTeX failures
+
+### Infrastructure
+- Preset configuration system with `run_with_config.py` and `--override` support
+- SLURM job script with preset integration
+- Preflight tool checks in GUI
+- `minimap2` and `flye` added to conda environment
+
+## v0.1.0
+- Initial release
+- Kraken2 classification and Bracken abundance estimation
+- SPAdes de novo assembly
+- BLAST identification
+- BWA coverage graphs
+- Orbivirus-specific segment ordering
+- Reference-guided assembly with consensus VCF
+- Excel and PDF report generation

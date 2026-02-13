@@ -134,6 +134,52 @@ def load_database_root() -> str:
             print(f"Warning: Could not read {config_path}: {e}")
     return ''
 
+
+def load_reference_cache() -> str:
+    """Load reference_cache directory from ~/.kraken_id_parse.yaml if it exists."""
+    config_path = os.path.expanduser("~/.kraken_id_parse.yaml")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+            return cfg.get('reference_cache', '')
+        except Exception as e:
+            print(f"Warning: Could not read {config_path}: {e}")
+    return ''
+
+import gzip
+
+
+def detect_platform(fastq_path: str, n_reads: int = 100) -> str:
+    """Auto-detect sequencing platform from FASTQ read lengths.
+
+    Reads the first *n_reads* records. If the max observed read length
+    exceeds 701 bp the data is assumed to be Oxford Nanopore (ONT);
+    otherwise Illumina short-read.  Threshold follows vSNP3 convention.
+    """
+    opener = gzip.open if fastq_path.endswith('.gz') else open
+    max_len = 0
+    count = 0
+    try:
+        with opener(fastq_path, 'rt') as fh:
+            while count < n_reads:
+                header = fh.readline()
+                if not header:
+                    break
+                seq = fh.readline().strip()
+                fh.readline()  # +
+                fh.readline()  # qual
+                if seq:
+                    max_len = max(max_len, len(seq))
+                    count += 1
+    except Exception as e:
+        print(f"Warning: could not auto-detect platform from {fastq_path}: {e}")
+        return 'illumina'
+    platform = 'ont' if max_len > 701 else 'illumina'
+    print(f"Platform detected: {platform} (max read length: {max_len:,} bp from first {count} reads)")
+    return platform
+
+
 from fastq_stats_seqkit import FASTQ_Stats
 from alignment_vcf import Alignment
 from blast_fasta_and_search import Blast_Fasta
@@ -173,8 +219,25 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     parser.add_argument("-s", "--specific", action='store', dest='specific', default=None, help='Specify custom script/function for the target being used.  Often just default to the taxon name')
     parser.add_argument('-d', '--debug', action='store_true', dest='debug', default=False, help='keep temp file')
     parser.add_argument('--keep-extracted-reads', action='store_true', dest='keep_extracted_reads', default=False, help='Keep taxon-extracted FASTQ files (default: remove to save space)')
+    parser.add_argument('--reference-cache', action='store', dest='reference_cache', default=None,
+                        help='Directory to cache downloaded NCBI reference FASTAs (skips re-download on cache hit)')
+    parser.add_argument('--platform', action='store', dest='platform', default='auto',
+                        choices=['illumina', 'ont', 'auto'],
+                        help='Sequencing platform: illumina (BWA+SPAdes), ont (minimap2+Flye), auto (detect from read length >701bp)')
     parser.add_argument('-v', '--version', action='version', version=f'{os.path.basename(__file__)}: version {__version__}')
     args = parser.parse_args()
+
+    # --- Resolve reference cache directory ---
+    reference_cache = args.reference_cache or load_reference_cache() or None
+    if reference_cache:
+        print(f"{bcolors.BLUE}Reference cache directory: {reference_cache}{bcolors.ENDC}")
+
+    # --- Resolve sequencing platform ---
+    if args.platform == 'auto':
+        platform = detect_platform(args.FASTQ_R1)
+    else:
+        platform = args.platform
+    print(f"{bcolors.BLUE}Sequencing platform: {platform}{bcolors.ENDC}")
 
     # --- Auto-resolve BLAST database from taxon ---
     database_root = args.database_root or load_database_root()
@@ -387,7 +450,8 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     assembler = Assemble(
         FASTQ_R1=f"{parser.r1_out}.gz",
         FASTQ_R2=f"{parser.r2_out}.gz",
-        debug=args.debug
+        debug=args.debug,
+        platform=platform
     )
     try:
         assembler.run()
@@ -406,13 +470,13 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     print(f"\n{bcolors.BLUE}Step 3: Running BLAST analysis using {args.blast_db}...{bcolors.ENDC}")
     blast = Blast_Fasta(FASTA=assembler.FASTA, blast_db=args.blast_db)
 
-    blast_to_coverage = BlastCoverageBridge(blast.blast_summary_file)
+    blast_to_coverage = BlastCoverageBridge(blast.blast_summary_file, cache_dir=reference_cache)
     blast_to_coverage.process()
 
     # Step 4: Coverage analysis
     print(f"\n{bcolors.BLUE}Step 4: Running coverage analysis...{bcolors.ENDC}")
     # Get top 5 unique accessions from BLAST results        
-    coverage_graph = Coverage_Graph(FASTA=blast_to_coverage.combined_fasta, FASTQ_R1=assembler.FASTQ_R1, FASTQ_R2=assembler.FASTQ_R2, debug=args.debug)
+    coverage_graph = Coverage_Graph(FASTA=blast_to_coverage.combined_fasta, FASTQ_R1=assembler.FASTQ_R1, FASTQ_R2=assembler.FASTQ_R2, debug=args.debug, platform=platform)
     coverage_graph.get_coverage_graph()
 
     # Update the assembled FASTA file with file name containing "denovo"
@@ -438,7 +502,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                 isav_dict[seq_id] = seq_info
         if isav_dict:
             apicomplexa.run(alignment_stats=isav_dict)
-            coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug)
+            coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug, platform=platform)
             coverage_graph.get_coverage_graph()
             coverage_graph.latex(latex_report.tex)
             source = open('concatenated_specific.fasta', 'r')
@@ -458,7 +522,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                 isav_dict[seq_id] = seq_info
         if isav_dict:
             isav_specific.run(alignment_stats=isav_dict)
-            coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug)
+            coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug, platform=platform)
             coverage_graph.get_coverage_graph()
             coverage_graph.latex(latex_report.tex)
             source = open('concatenated_specific.fasta', 'r')
@@ -481,7 +545,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                 ehv_dict[seq_id] = seq_info
         if btv_dict:
             orbivirus_specific.run(alignment_stats=btv_dict)
-            coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug)
+            coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug, platform=platform)
             coverage_graph.get_coverage_graph()
             coverage_graph.latex(latex_report.tex)
             source = open('concatenated_specific.fasta', 'r')
@@ -491,7 +555,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
         if ehv_dict:
             orbivirus_specific.run(alignment_stats=ehv_dict)
-            coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug)
+            coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug, platform=platform)
             coverage_graph.get_coverage_graph()
             coverage_graph.latex(latex_report.tex)
             source = open('concatenated_specific.fasta', 'r')
@@ -541,7 +605,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             print(f'Downloading reference: {accession}')
             
             # Download with proper error handling and rate limiting
-            download = Downloader(accession)
+            download = Downloader(accession, cache_dir=reference_cache)
             max_retries = 3
             success = False
             
@@ -595,7 +659,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
 ####################################################################################################################
     if args.specific:
-        alignment = Alignment(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, reference='all_downloaded.fasta', skip_assembly=True, debug=True)
+        alignment = Alignment(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, reference='all_downloaded.fasta', skip_assembly=True, debug=True, platform=platform)
         alignment.run()
 
         # id_parse.parse_fastas(bam=alignment.nodup_bamfile, fasta=alignment.reference)
@@ -621,10 +685,10 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                     print(f"  Waiting {wait_time} seconds (NCBI rate limiting)...")
                     time.sleep(wait_time)
                 
-                download = Downloader(acc)
+                download = Downloader(acc, cache_dir=reference_cache)
                 max_retries = 3
                 success = False
-                
+
                 # Retry with exponential backoff
                 for attempt in range(max_retries):
                     try:
@@ -686,7 +750,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
         if os.path.isdir('./temp'):
             shutil.rmtree('./temp')
-        alignment = Alignment(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, reference='top_downloaded_genomes.fasta', skip_assembly=True, debug=True)
+        alignment = Alignment(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, reference='top_downloaded_genomes.fasta', skip_assembly=True, debug=True, platform=platform)
         alignment.run()
 
         reference_guided_assembly = Reference_Guided_Assembly(FASTA=f'{alignment.reference}', vcf=f'{alignment.zc_vcf}', iupac=True, output_name='consensus.fasta')
@@ -728,7 +792,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         output_file = "output.fasta"
         clean_fasta_headers(input_file, output_file)
         
-        coverage_graph = Coverage_Graph(FASTA="output.fasta", FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2)
+        coverage_graph = Coverage_Graph(FASTA="output.fasta", FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, platform=platform)
         coverage_graph.get_coverage_graph()
         os.remove("output.fasta")
         coverage_graph.latex(latex_report.tex)
@@ -737,7 +801,8 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
     # Write methodology appendix before closing the report
     def write_report_appendix(tex, taxon, kraken_db, blast_db, sample_name,
-                              parser_obj=None, assembler_obj=None, blast_obj=None):
+                              parser_obj=None, assembler_obj=None, blast_obj=None,
+                              platform='illumina'):
         """Write a hybrid methodology appendix to the LaTeX report.
 
         Dynamically populates method descriptions with actual parameters
@@ -746,6 +811,10 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         # Escape underscores for LaTeX
         def esc(s):
             return str(s).replace('_', r'\_').replace('&', r'\&').replace('%', r'\%')
+
+        # Platform-aware tool names
+        assembler_name = 'Flye (ONT long-read)' if platform == 'ont' else 'SPAdes'
+        aligner_name = 'minimap2 (ONT)' if platform == 'ont' else 'BWA-MEM'
 
         kraken_db_name = esc(os.path.basename(kraken_db)) if kraken_db else 'default'
         blast_db_name = esc(os.path.basename(blast_db)) if blast_db else 'nt'
@@ -778,9 +847,9 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         print(r'FASTQ Quality & Read quality metrics (Q30, mean Phred score, read length) \\', file=tex)
         print(f'Taxonomic Classification & Kraken2 / Bracken using \\texttt{{{kraken_db_name}}} database \\\\', file=tex)
         print(f'Read Extraction & Reads classified as \\textit{{{taxon_esc}}} extracted for downstream analysis \\\\', file=tex)
-        print(r'\textit{De novo} Assembly & SPAdes assembler \\', file=tex)
+        print(f'\\textit{{De novo}} Assembly & {esc(assembler_name)} assembler \\\\', file=tex)
         print(f'BLAST Identification & BLASTn against \\texttt{{{blast_db_name}}} database \\\\', file=tex)
-        print(r'Coverage Analysis & BWA alignment to top BLAST reference hits \\', file=tex)
+        print(f'Coverage Analysis & {esc(aligner_name)} alignment to top BLAST reference hits \\\\', file=tex)
         print(r'Reference-Guided Assembly & Consensus sequence from guided alignment \\', file=tex)
         print(r'\hline', file=tex)
         print(r'\end{tabular}', file=tex)
@@ -810,11 +879,18 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
         # Assembly
         print(r'\noindent\textbf{\textit{De novo} Assembly}\\', file=tex)
-        print(r'\noindent Extracted reads were assembled using '
-              r'\href{https://github.com/ablab/spades}{SPAdes}. '
-              r'\textbf{N50}: half of the total assembled length is from contigs $\geq$ this value. '
-              r'\textbf{Mean Coverage}: estimated average read depth across total assembly length '
-              r'(read count $\times$ read length $\div$ total assembly length).\\[0.8em]', file=tex)
+        if platform == 'ont':
+            print(r'\noindent Extracted long reads were assembled using '
+                  r'\href{https://github.com/fenderglass/Flye}{Flye} (\texttt{-{}-nano-raw}). '
+                  r'\textbf{N50}: half of the total assembled length is from contigs $\geq$ this value. '
+                  r'\textbf{Mean Coverage}: estimated average read depth across total assembly length '
+                  r'(read count $\times$ read length $\div$ total assembly length).\\[0.8em]', file=tex)
+        else:
+            print(r'\noindent Extracted reads were assembled using '
+                  r'\href{https://github.com/ablab/spades}{SPAdes}. '
+                  r'\textbf{N50}: half of the total assembled length is from contigs $\geq$ this value. '
+                  r'\textbf{Mean Coverage}: estimated average read depth across total assembly length '
+                  r'(read count $\times$ read length $\div$ total assembly length).\\[0.8em]', file=tex)
 
         # BLAST
         print(r'\noindent\textbf{BLAST Identification}\\', file=tex)
@@ -826,19 +902,34 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
         # Coverage
         print(r'\noindent\textbf{Coverage Analysis}\\', file=tex)
-        print(r'\noindent Reads were aligned to reference sequences using '
-              r'\href{https://github.com/lh3/bwa}{BWA-MEM}. '
-              r'Duplicates were removed with Picard MarkDuplicates. '
-              r'Depth-of-coverage was calculated using samtools. '
-              r'When average depth exceeds 100X, log-scale depth is plotted; otherwise linear scale is used. '
-              r'The red dashed line indicates the 100X threshold. '
-              r'\textbf{\% Genome Covered}: percentage of the reference with $\geq$1X read depth.\\[0.8em]', file=tex)
+        if platform == 'ont':
+            print(r'\noindent Reads were aligned to reference sequences using '
+                  r'\href{https://github.com/lh3/minimap2}{minimap2} (\texttt{-x map-ont}). '
+                  r'Duplicates were removed with Picard MarkDuplicates. '
+                  r'Depth-of-coverage was calculated using samtools. '
+                  r'VCF QUAL scores were adjusted +100 to compensate for lower nanopore base quality. '
+                  r'When average depth exceeds 100X, log-scale depth is plotted; otherwise linear scale is used. '
+                  r'The red dashed line indicates the 100X threshold. '
+                  r'\textbf{\% Genome Covered}: percentage of the reference with $\geq$1X read depth.\\[0.8em]', file=tex)
+        else:
+            print(r'\noindent Reads were aligned to reference sequences using '
+                  r'\href{https://github.com/lh3/bwa}{BWA-MEM}. '
+                  r'Duplicates were removed with Picard MarkDuplicates. '
+                  r'Depth-of-coverage was calculated using samtools. '
+                  r'When average depth exceeds 100X, log-scale depth is plotted; otherwise linear scale is used. '
+                  r'The red dashed line indicates the 100X threshold. '
+                  r'\textbf{\% Genome Covered}: percentage of the reference with $\geq$1X read depth.\\[0.8em]', file=tex)
 
         # Reference-guided assembly
         print(r'\noindent\textbf{Reference-Guided Consensus}\\', file=tex)
-        print(r'\noindent A reference-guided consensus assembly was generated by aligning reads to the '
-              r'top BLAST reference hits using BWA-MEM, calling variants with bcftools, and producing '
-              r'a consensus FASTA. This consensus was then re-evaluated for coverage depth.\\[0.8em]', file=tex)
+        if platform == 'ont':
+            print(r'\noindent A reference-guided consensus assembly was generated by aligning reads to the '
+                  r'top BLAST reference hits using minimap2, calling variants with freebayes, and producing '
+                  r'a consensus FASTA. This consensus was then re-evaluated for coverage depth.\\[0.8em]', file=tex)
+        else:
+            print(r'\noindent A reference-guided consensus assembly was generated by aligning reads to the '
+                  r'top BLAST reference hits using BWA-MEM, calling variants with freebayes, and producing '
+                  r'a consensus FASTA. This consensus was then re-evaluated for coverage depth.\\[0.8em]', file=tex)
 
     write_report_appendix(
         tex=latex_report.tex,
@@ -849,6 +940,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         parser_obj=parser,
         assembler_obj=assembler,
         blast_obj=blast,
+        platform=platform,
     )
 
     latex_report.latex_ending()

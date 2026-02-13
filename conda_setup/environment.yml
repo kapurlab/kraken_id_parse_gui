@@ -24,6 +24,8 @@ dependencies:
   - samtools>=1.13
   - seaborn>=0.11
   - spades>=3.15
+  - minimap2>=2.24
+  - flye>=2.9
   - svgwrite>=1.4
   - seqkit
   - openpyxl

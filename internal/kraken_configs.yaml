@@ -120,3 +120,9 @@ defaults:
   # pick nt_viruses for viral taxa, ref_prok_rep_genomes for bacterial, etc.
   # Per-preset blast_db values override auto-resolution.
   # database_root: ""
+  # reference_cache: Directory to cache downloaded NCBI reference FASTAs.
+  # On cache hit the pipeline copies from here instead of re-downloading.
+  # Example: reference_cache: "/path/to/reference_cache"
+  # platform: Sequencing platform — illumina (BWA+SPAdes), ont (minimap2+Flye),
+  #           or auto (detect from read length >701bp). Default: auto
+  # platform: "auto"

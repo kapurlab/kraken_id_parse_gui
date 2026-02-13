@@ -17,19 +17,21 @@ from file_setup import Setup, bcolors
 class BlastCoverageBridge(Setup):
     """Bridge between BLAST results and coverage analysis"""
     
-    def __init__(self, blast_summary: str, max_refs: int = 100, debug: bool = False):
+    def __init__(self, blast_summary: str, max_refs: int = 100, debug: bool = False, cache_dir: str = None):
         """
         Initialize bridge processing
-        
+
         Args:
             blast_summary: Path to BLAST summary file
             max_refs: Maximum number of references to process
             debug: Enable debug output
+            cache_dir: Optional path to local reference FASTA cache directory
         """
         super().__init__(debug=debug)
         self.blast_summary = blast_summary
         self.max_refs = max_refs
         self.debug = debug
+        self.cache_dir = cache_dir
         self.downloaded_fastas = []
         self.combined_fasta = None
 
@@ -81,8 +83,8 @@ class BlastCoverageBridge(Setup):
         
         for acc in accessions:
             try:
-                downloader = Downloader(acc,)
-                description = downloader.fasta()  # Downloads file and returns description
+                downloader = Downloader(acc, cache_dir=self.cache_dir)
+                description = downloader.fasta()  # Downloads (or cache-hit) and returns description
                 
                 fasta_file = f"{acc}.fasta"
                 if os.path.exists(fasta_file):

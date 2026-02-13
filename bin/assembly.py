@@ -24,9 +24,10 @@ class SPAdesDidNotAssembleFASTA(Exception):
     pass
 
 class Assemble(Setup):
-    def __init__(self, FASTA=None, FASTQ_R1=None, FASTQ_R2=None, debug=False):
+    def __init__(self, FASTA=None, FASTQ_R1=None, FASTQ_R2=None, debug=False, platform='illumina'):
         # First call parent class initialization
         super().__init__(FASTA=FASTA, FASTQ_R1=FASTQ_R1, FASTQ_R2=FASTQ_R2, debug=debug)
+        self.platform = platform
         
         # Ensure sample_name is set
         if not hasattr(self, 'sample_name'):
@@ -46,30 +47,51 @@ class Assemble(Setup):
 
     def run(self):
         '''
-        Run SPAdes assembly, single read assumes ion torrent
+        Run assembly: SPAdes for Illumina reads, Flye for ONT long reads.
         '''
         FASTQ_list = self.FASTQ_list
         cwd = self.cwd
         debug = self.debug
 
-        self.print_run_time('SPAdes')
-        if len(FASTQ_list) == 2:
-            subprocess.run(["spades.py", "-1", FASTQ_list[0], "-2", FASTQ_list[1], "-o", "spades_assembly"], capture_output=True)
-        elif len(FASTQ_list) == 1:
-            subprocess.run(["spades.py", "-s", FASTQ_list[0], "-o", "spades_assembly"], capture_output=True)
+        if self.platform == 'ont':
+            # --- ONT: Flye assembler ---
+            self.print_run_time('Flye (ONT)')
+            flye_out = f'{cwd}/flye_assembly'
+            cmd = ["flye", "--nano-raw", FASTQ_list[0],
+                   "-o", flye_out, "--threads", str(self.cpus)]
+            print(f"Running: {' '.join(cmd)}")
+            subprocess.run(cmd, capture_output=True)
+
+            flye_fasta = os.path.join(flye_out, "assembly.fasta")
+            if os.path.exists(flye_fasta):
+                shutil.copy2(flye_fasta, f'{cwd}/{self.sample_name}.fasta')
+                self.FASTA = f'{cwd}/{self.sample_name}.fasta'
+            else:
+                print(f'\n### Flye did not complete, see log\n')
+                raise SPAdesDidNotAssembleFASTA(f'Flye assembly failed - check ONT reads')
+
+            if not debug:
+                shutil.rmtree(flye_out)
         else:
-            print(f'\n### Must have either single or paired read set.\n')
-            sys.exit(0)
-        
-        if os.path.exists(f'{cwd}/spades_assembly/scaffolds.fasta'):
-            shutil.copy2(f'{cwd}/spades_assembly/scaffolds.fasta', f'{cwd}/{self.sample_name}.fasta')
-            self.FASTA = f'{cwd}/{self.sample_name}.fasta'
-        else:
-            print(f'\n### SPAdes did not complete, see log\n')
-            raise SPAdesDidNotAssembleFASTA(f'SPAdes assembly fails - Likely due to input reads')
-        
-        if not debug:
-            shutil.rmtree(f'{cwd}/spades_assembly')
+            # --- Illumina: SPAdes assembler ---
+            self.print_run_time('SPAdes')
+            if len(FASTQ_list) == 2:
+                subprocess.run(["spades.py", "-1", FASTQ_list[0], "-2", FASTQ_list[1], "-o", "spades_assembly"], capture_output=True)
+            elif len(FASTQ_list) == 1:
+                subprocess.run(["spades.py", "-s", FASTQ_list[0], "-o", "spades_assembly"], capture_output=True)
+            else:
+                print(f'\n### Must have either single or paired read set.\n')
+                sys.exit(0)
+
+            if os.path.exists(f'{cwd}/spades_assembly/scaffolds.fasta'):
+                shutil.copy2(f'{cwd}/spades_assembly/scaffolds.fasta', f'{cwd}/{self.sample_name}.fasta')
+                self.FASTA = f'{cwd}/{self.sample_name}.fasta'
+            else:
+                print(f'\n### SPAdes did not complete, see log\n')
+                raise SPAdesDidNotAssembleFASTA(f'SPAdes assembly fails - Likely due to input reads')
+
+            if not debug:
+                shutil.rmtree(f'{cwd}/spades_assembly')
 
     def stats(self, FASTA=None):
         '''

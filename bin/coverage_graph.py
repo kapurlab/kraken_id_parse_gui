@@ -23,8 +23,9 @@ from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
 
 
 class Coverage_Graph(Setup):
-    def __init__(self, FASTA=None, FASTQ_R1=None, FASTQ_R2=None, debug=False):
+    def __init__(self, FASTA=None, FASTQ_R1=None, FASTQ_R2=None, debug=False, platform='illumina'):
         super().__init__(FASTA=FASTA, FASTQ_R1=FASTQ_R1, FASTQ_R2=FASTQ_R2, debug=debug)
+        self.platform = platform
         self.reference = FASTA
         try:
             self.reference_name = re.sub('[._].*', '', os.path.basename(FASTA))
@@ -62,26 +63,33 @@ class Coverage_Graph(Setup):
         return temp_reference
 
     def _align_reads(self, temp_reference):
-        """Align reads to reference using BWA"""
+        """Align reads to reference using BWA (illumina) or minimap2 (ont)"""
         if self.debug:
-            print("Starting read alignment")
-            
+            print(f"Starting read alignment (platform={self.platform})")
+
         sample_name = re.sub('[._].*', '', os.path.basename(self.FASTQ_R1))
-        
-        # Index reference
-        subprocess.run(["bwa", "index", temp_reference], check=True)
-        
-        # Align reads
+
         sam_file = f"{sample_name}.sam"
         bam_file = f"{sample_name}.bam"
         sorted_bam = f"{sample_name}.sorted.bam"
-        
-        print(f"Aligning reads to reference...")
-            
-        with open(sam_file, 'w') as sam:
-            subprocess.run(["bwa", "mem", "-t", str(self.cpus), temp_reference, 
-                          self.FASTQ_R1, self.FASTQ_R2],
-                         stdout=sam, check=True)
+
+        print(f"Aligning reads to reference ({self.platform} mode)...")
+
+        if self.platform == 'ont':
+            # ONT: minimap2, single-end only
+            cmd = ["minimap2", "-a", "-x", "map-ont", "-t", str(self.cpus),
+                   temp_reference, self.FASTQ_R1]
+            with open(sam_file, 'w') as sam:
+                subprocess.run(cmd, stdout=sam, check=True)
+        else:
+            # Illumina: BWA-MEM
+            subprocess.run(["bwa", "index", temp_reference], check=True)
+            cmd = ["bwa", "mem", "-t", str(self.cpus), temp_reference, self.FASTQ_R1]
+            # BUG FIX: only append R2 if it is not None (single-end support)
+            if self.FASTQ_R2:
+                cmd.append(self.FASTQ_R2)
+            with open(sam_file, 'w') as sam:
+                subprocess.run(cmd, stdout=sam, check=True)
         
         # Convert to BAM and sort
         subprocess.run(["samtools", "view", "-bS", sam_file], 

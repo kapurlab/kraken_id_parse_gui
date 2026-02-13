@@ -19,7 +19,7 @@ from random import randint
 from time import sleep
 from Bio import SeqIO
 
-from file_setup import bcolors, Latex_Report, Excel_Stats
+from file_setup import bcolors, Banner, Latex_Report, Excel_Stats
 
 from fastq_stats_seqkit import FASTQ_Stats
 from alignment_vcf import Alignment
@@ -57,6 +57,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     parser.add_argument("-b", "--blast_db", action='store', dest='blast_db', default="nt", help='Specify BLAST db to use')
     parser.add_argument("-s", "--specific", action='store', dest='specific', default=None, help='Specify custom script/function for the target being used.  Often just default to the taxon name')
     parser.add_argument('-d', '--debug', action='store_true', dest='debug', default=False, help='keep temp file')
+    parser.add_argument('--keep-extracted-reads', action='store_true', dest='keep_extracted_reads', default=False, help='Keep taxon-extracted FASTQ files (default: remove to save space)')
     parser.add_argument('-v', '--version', action='version', version=f'{os.path.basename(__file__)}: version {__version__}')
     args = parser.parse_args()
     
@@ -118,27 +119,111 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             print("Neither kraken nor kraken2 folder found in current directory.  Run script with -k option to first run Kraken.")
 
 ############################
-    def cleanup_artifacts(debug: bool = False):
-        temp_dir = './temp'
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
-        files_grab = []
-        for files in ('*.aux', '*.log', '*tex', '*png', '*out', 'batch.sh', '*_blast_all.txt', '*_blast_out.txt', '*_blast_summary.txt', 'coverage_list.txt', 'coverage.txt', '*-coverage_graph.pdf', 'combined_references.fasta', 'CAUTION_SITES.xlsx'):
-            files_grab.extend(glob.glob(files))
-        print("Removing:")
-        for each in files_grab:
-            print(f'\t{each}')
-            shutil.move(each, temp_dir)
+    def cleanup_artifacts(keep_extracted_reads: bool = False):
+        """Clean up intermediate files while preserving final outputs.
 
-        shutil.rmtree(temp_dir)
-        try: 
-            shutil.rmtree('alignment_all')
-        except: 
-            pass
-        try:
-            shutil.rmtree('alignment_top')
-        except: 
-            pass
+        Preserved (always):
+            *_report.pdf          - PDF report
+            *_stats.xlsx          - Excel statistics
+            *_denovo.fasta        - De novo assembly
+            *_reference_guided.fasta - Consensus sequence
+            *_blast_summary.txt   - BLAST summaries
+            consensus_blast_summary.txt
+            CAUTION_SITES.xlsx    - Ambiguous sites QC
+            kraken/ folder        - Kraken report, bracken xlsx, krona HTML
+                                   (but NOT the large _outputkraken.txt)
+            Input FASTQ symlinks/files
+
+        Preserved (with --keep-extracted-reads):
+            *_<taxon>_R1.fastq.gz - Extracted taxon reads
+            *_<taxon>_R2.fastq.gz
+
+        Removed:
+            *.aux, *.log, *.out   - LaTeX intermediates
+            *_report.tex          - LaTeX source
+            *-banner.png          - Section banners (embedded in PDF)
+            bracken_pie.png       - Pie chart (embedded in PDF)
+            *-coverage_graph.pdf  - Coverage graphs (embedded in PDF)
+            combined_references.fasta - Downloaded references
+            *_blast_all.txt, *_blast_out.txt - Raw BLAST output
+            coverage_list.txt, coverage.txt - Coverage intermediates
+            batch.sh              - Temp batch script
+            kraken/_outputkraken.txt - Large per-read classification (32MB+)
+        """
+        # --- Files to always remove ---
+        temp_patterns = [
+            '*.aux', '*.log', '*.out', 'batch.sh',
+            '*_report.tex',
+            '*_blast_all.txt', '*_blast_out.txt',
+            '*-banner.png',
+            'bracken_pie.png',
+            '*-coverage_graph.pdf',
+            'combined_references.fasta',
+            'coverage_list.txt', 'coverage.txt',
+        ]
+
+        files_to_remove = []
+        for pattern in temp_patterns:
+            files_to_remove.extend(glob.glob(pattern))
+
+        # Remove large kraken output file (per-read classifications)
+        for f in glob.glob('kraken/*_outputkraken.txt'):
+            files_to_remove.append(f)
+
+        # Optionally remove extracted taxon reads (default: remove)
+        if not keep_extracted_reads:
+            for f in glob.glob('*_R1.fastq.gz') + glob.glob('*_R2.fastq.gz'):
+                # Only remove extracted reads (contain taxon name), not original inputs
+                # Extracted reads have pattern: SAMPLE_Taxon_R1.fastq.gz
+                basename = os.path.basename(f)
+                parts = basename.replace('.fastq.gz', '').rsplit('_', 1)  # split off R1/R2
+                if len(parts) == 2:
+                    prefix = parts[0]  # e.g. SRR9598511_Orbivirus
+                    # If prefix contains an underscore, it's likely an extracted read
+                    # (original inputs are SAMPLE_R1.fastq.gz, extracted are SAMPLE_Taxon_R1.fastq.gz)
+                    if prefix.count('_') >= 1:
+                        # Check it's not the original input by seeing if a simpler name exists
+                        sample_base = prefix.split('_')[0]
+                        r_suffix = parts[1]  # R1 or R2
+                        original = f'{sample_base}_{r_suffix}.fastq.gz'
+                        if os.path.exists(original) and f != original and os.path.abspath(f) != os.path.abspath(original):
+                            files_to_remove.append(f)
+
+        if files_to_remove:
+            print("Cleaning up intermediate files:")
+            for f in files_to_remove:
+                print(f'\t{f}')
+                try:
+                    os.remove(f)
+                except OSError as e:
+                    print(f'\t  Warning: could not remove {f}: {e}')
+
+        # Remove temporary alignment directories
+        for d in ['alignment_all', 'alignment_top']:
+            if os.path.isdir(d):
+                try:
+                    shutil.rmtree(d)
+                except OSError:
+                    pass
+
+        # Remove ./temp directory if it exists from earlier steps
+        if os.path.isdir('./temp'):
+            shutil.rmtree('./temp')
+
+        # Print summary of preserved files
+        preserved = [f for f in os.listdir('.') if os.path.isfile(f)]
+        preserved_dirs = [d for d in os.listdir('.') if os.path.isdir(d)]
+        print(f"\nFinal output files ({len(preserved)} files, {len(preserved_dirs)} directories):")
+        for f in sorted(preserved):
+            size = os.path.getsize(f)
+            if size > 1024*1024:
+                print(f'\t{f}  ({size/(1024*1024):.1f} MB)')
+            elif size > 1024:
+                print(f'\t{f}  ({size/1024:.1f} KB)')
+            else:
+                print(f'\t{f}  ({size} B)')
+        for d in sorted(preserved_dirs):
+            print(f'\t{d}/')
         
     """Execute the complete analysis pipeline"""
     print(f"\n{bcolors.GREEN}Starting bioinformatics analysis pipeline...{bcolors.ENDC}\n")
@@ -469,8 +554,9 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         else:
             print(f"Proceeding with {downloaded_count} successfully downloaded references...")
         # END OF IMPROVED DOWNLOAD SECTION
-        
-        shutil.rmtree('./temp')
+
+        if os.path.isdir('./temp'):
+            shutil.rmtree('./temp')
         alignment = Alignment(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, reference='top_downloaded_genomes.fasta', skip_assembly=True, debug=True)
         alignment.run()
 
@@ -487,7 +573,8 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         SeqIO.write(renamed_fastas, final_consensus, "fasta")
         os.remove('consensus.fasta')
 
-        shutil.rmtree('./temp')
+        if os.path.isdir('./temp'):
+            shutil.rmtree('./temp')
         
         def clean_fasta_headers(input_file, output_file):
             """
@@ -519,14 +606,136 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
 ####################################################################################################################
 
+    # Write methodology appendix before closing the report
+    def write_report_appendix(tex, taxon, kraken_db, blast_db, sample_name,
+                              parser_obj=None, assembler_obj=None, blast_obj=None):
+        """Write a hybrid methodology appendix to the LaTeX report.
+
+        Dynamically populates method descriptions with actual parameters
+        used during this pipeline run.
+        """
+        # Escape underscores for LaTeX
+        def esc(s):
+            return str(s).replace('_', r'\_').replace('&', r'\&').replace('%', r'\%')
+
+        kraken_db_name = esc(os.path.basename(kraken_db)) if kraken_db else 'default'
+        blast_db_name = esc(os.path.basename(blast_db)) if blast_db else 'nt'
+        taxon_esc = esc(taxon) if taxon else 'target organism'
+
+        appendix_banner = Banner("Report Description")
+
+        print(r'\clearpage', file=tex)
+        print(r'\newpage', file=tex)
+        print(r'\begin{table}[H]', file=tex)
+        print(r'\centering', file=tex)
+        print(r'\includegraphics[width=\textwidth]{' + appendix_banner.banner + r'}', file=tex)
+        print(r'\end{table}', file=tex)
+        print(r'\vspace{0.3cm}', file=tex)
+
+        # Pipeline summary
+        print(r'\noindent\textbf{\large Pipeline Summary}\\[0.5em]', file=tex)
+        print(r'\noindent Input paired-end FASTQ reads were processed through an automated bioinformatics pipeline. '
+              f'Reads were classified, filtered for \\textit{{{taxon_esc}}}, assembled \\textit{{de novo}}, '
+              f'identified by BLAST, aligned to reference sequences, and analyzed for coverage depth. '
+              r'A reference-guided consensus assembly was also generated.\\[1em]', file=tex)
+
+        # Test summary table
+        print(r'\noindent\textbf{Analyses Performed}\\[0.3em]', file=tex)
+        print(r'\begin{table}[H]', file=tex)
+        print(r'\begin{adjustbox}{width=0.85\textwidth}', file=tex)
+        print(r'\begin{tabular}{l|l}', file=tex)
+        print(r'Analysis & Description \\', file=tex)
+        print(r'\hline', file=tex)
+        print(r'FASTQ Quality & Read quality metrics (Q30, mean Phred score, read length) \\', file=tex)
+        print(f'Taxonomic Classification & Kraken2 / Bracken using \\texttt{{{kraken_db_name}}} database \\\\', file=tex)
+        print(f'Read Extraction & Reads classified as \\textit{{{taxon_esc}}} extracted for downstream analysis \\\\', file=tex)
+        print(r'\textit{De novo} Assembly & SPAdes assembler \\', file=tex)
+        print(f'BLAST Identification & BLASTn against \\texttt{{{blast_db_name}}} database \\\\', file=tex)
+        print(r'Coverage Analysis & BWA alignment to top BLAST reference hits \\', file=tex)
+        print(r'Reference-Guided Assembly & Consensus sequence from guided alignment \\', file=tex)
+        print(r'\hline', file=tex)
+        print(r'\end{tabular}', file=tex)
+        print(r'\end{adjustbox}', file=tex)
+        print(r'\end{table}', file=tex)
+
+        # Detailed method descriptions
+        print(r'\vspace{0.5cm}', file=tex)
+        print(r'\noindent\textbf{\large Method Descriptions}\\[0.5em]', file=tex)
+
+        # FASTQ Quality
+        print(r'\noindent\textbf{FASTQ Quality}\\', file=tex)
+        print(r'\noindent Compressed FASTQ files were evaluated for read quality. '
+              r'\textbf{Q30 Passing}: percentage of reads with average Phred score $>$30. '
+              r'\textbf{Mean Read Score}: average Phred score across all base calls. '
+              r'\textbf{Average Read Length}: mean read length in base pairs.\\[0.8em]', file=tex)
+
+        # Kraken/Bracken
+        print(r'\noindent\textbf{Taxonomic Classification (Kraken2/Bracken)}\\', file=tex)
+        print(r'\noindent Reads were classified using '
+              r'\href{https://ccb.jhu.edu/software/kraken2/}{Kraken2} with the '
+              f'\\texttt{{{kraken_db_name}}} database. '
+              r'Species-level abundance was estimated using '
+              r'\href{https://ccb.jhu.edu/software/bracken/}{Bracken}. '
+              r'Species comprising $>$1\% of total reads are shown in the pie chart. '
+              r'Unclassified reads had no exact k-mer matches in the database.\\[0.8em]', file=tex)
+
+        # Assembly
+        print(r'\noindent\textbf{\textit{De novo} Assembly}\\', file=tex)
+        print(r'\noindent Extracted reads were assembled using '
+              r'\href{https://github.com/ablab/spades}{SPAdes}. '
+              r'\textbf{N50}: half of the total assembled length is from contigs $\geq$ this value. '
+              r'\textbf{Mean Coverage}: estimated average read depth across total assembly length '
+              r'(read count $\times$ read length $\div$ total assembly length).\\[0.8em]', file=tex)
+
+        # BLAST
+        print(r'\noindent\textbf{BLAST Identification}\\', file=tex)
+        print(r'\noindent Assembled contigs were searched using '
+              r'\href{https://blast.ncbi.nlm.nih.gov/Blast.cgi}{BLASTn} against the '
+              f'\\texttt{{{blast_db_name}}} database. '
+              r'Results are sorted by total nucleotide representation (summed contig lengths for each top hit). '
+              r'Top unique accessions were used as references for coverage analysis.\\[0.8em]', file=tex)
+
+        # Coverage
+        print(r'\noindent\textbf{Coverage Analysis}\\', file=tex)
+        print(r'\noindent Reads were aligned to reference sequences using '
+              r'\href{https://github.com/lh3/bwa}{BWA-MEM}. '
+              r'Duplicates were removed with Picard MarkDuplicates. '
+              r'Depth-of-coverage was calculated using samtools. '
+              r'When average depth exceeds 100X, log-scale depth is plotted; otherwise linear scale is used. '
+              r'The red dashed line indicates the 100X threshold. '
+              r'\textbf{\% Genome Covered}: percentage of the reference with $\geq$1X read depth.\\[0.8em]', file=tex)
+
+        # Reference-guided assembly
+        print(r'\noindent\textbf{Reference-Guided Consensus}\\', file=tex)
+        print(r'\noindent A reference-guided consensus assembly was generated by aligning reads to the '
+              r'top BLAST reference hits using BWA-MEM, calling variants with bcftools, and producing '
+              r'a consensus FASTA. This consensus was then re-evaluated for coverage depth.\\[0.8em]', file=tex)
+
+    write_report_appendix(
+        tex=latex_report.tex,
+        taxon=args.taxon,
+        kraken_db=args.kraken_db,
+        blast_db=args.blast_db,
+        sample_name=sample_name,
+        parser_obj=parser,
+        assembler_obj=assembler,
+        blast_obj=blast,
+    )
+
     latex_report.latex_ending()
+    pdf_file = latex_report.tex_file.replace('.tex', '.pdf')
+    if os.path.exists(pdf_file):
+        print(f"\n{bcolors.GREEN}Report generated: {pdf_file}{bcolors.ENDC}")
+    else:
+        print(f"\n{bcolors.RED}Warning: PDF report was not generated. Check pdflatex installation.{bcolors.ENDC}")
+
     excel_stats.post_excel()
-    
+
     current_directory = os.getcwd()
     print(current_directory)
-    
-    cleanup_artifacts()
-    
+
+    cleanup_artifacts(keep_extracted_reads=args.keep_extracted_reads)
+
 
 
 # Created December 2024 by Tod Stuber

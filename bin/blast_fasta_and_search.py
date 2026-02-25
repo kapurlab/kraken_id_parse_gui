@@ -282,11 +282,8 @@ class Blast_Fasta(Setup, bcolors):
                 if count > 0:
                     blast_banner = Banner(f'BLAST {basename} - Assembly Identification - continued')
                 print(r'\begin{table}[H]', file=tex)
-                print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-                print(r'\begin{center}', file=tex)
-                print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-                print(r'\end{center}', file=tex)
-                print(r'\end{adjustbox}', file=tex)
+                print(r'\centering', file=tex)
+                print(r'\includegraphics[width=\textwidth]{' + blast_banner.banner + '}', file=tex)
                 print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
                 print(r'\begin{tabular}{ l | p{1.3cm} | l }', file=tex)
                 print(f'nt base count & contigs & Description \\\\', file=tex)
@@ -298,12 +295,9 @@ class Blast_Fasta(Setup, bcolors):
                     description = description.replace("_", "\_")[:108]
                     print(f'{each_row[0]} & {each_row[1]} & {description} \\\\', file=tex)
                 print(r'\hline', file=tex)
-                
-                print(r'\end{adjustbox}', file=tex)
-                print(r'\vspace{0.1 mm}', file=tex)
                 print(r'\end{tabular}', file=tex)
-                print(r'\\', file=tex)
-                basename_slashed = basename.replace("_", "\_")
+                print(r'\end{adjustbox}', file=tex)
+                basename_slashed = basename.replace("_", r"\_")
                 print(r'\begin{flushleft}Results provided by: \href{https://blast.ncbi.nlm.nih.gov/Blast.cgi}{BLAST ' + f'{basename_slashed}' + r' database}\end{flushleft}', file=tex)
                 print(r'\end{table}', file=tex)
                 count += 1

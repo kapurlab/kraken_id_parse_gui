@@ -129,6 +129,13 @@ def main():
             if verbose and isinstance(value, str) and expanded != value:
                 print(f"  {key}: {value} -> {expanded}")
             run_config[key] = expanded
+
+        # Drop logo if it doesn't exist to avoid LaTeX failures
+        logo_path = run_config.get("logo")
+        if isinstance(logo_path, str) and logo_path and not os.path.exists(logo_path):
+            if verbose:
+                print(f"Logo path not found, removing: {logo_path}")
+            run_config.pop("logo", None)
         
         if verbose:
             print("=== Final configuration ===")
@@ -207,7 +214,9 @@ def main():
         
         # Handle special parameters that need different treatment
         special_params = {
-            'r1_pattern', 'r2_pattern', 'debug', 'specific'
+            'r1_pattern', 'r2_pattern', 'debug', 'specific',
+            'database_root', 'keep_extracted_reads', 'reference_cache',
+            'platform'
         }
         
         # Handle file patterns differently - use the actual first file instead of pattern
@@ -226,7 +235,34 @@ def main():
             cmd.append('-d')
             if verbose:
                 print("Added debug flag (-d)")
-        
+
+        # Handle keep_extracted_reads flag
+        if run_config.get('keep_extracted_reads'):
+            cmd.append('--keep-extracted-reads')
+            if verbose:
+                print("Added --keep-extracted-reads flag")
+
+        # Handle database_root — pass through to kraken_id_parse.py
+        db_root = run_config.get('database_root', '')
+        if db_root:
+            cmd.extend(['--database-root', str(db_root)])
+            if verbose:
+                print(f"Added --database-root {db_root}")
+
+        # Handle reference_cache — local FASTA cache directory
+        ref_cache = run_config.get('reference_cache', '')
+        if ref_cache:
+            cmd.extend(['--reference-cache', str(ref_cache)])
+            if verbose:
+                print(f"Added --reference-cache {ref_cache}")
+
+        # Handle platform — sequencing platform (illumina, ont, auto)
+        plat = run_config.get('platform', '')
+        if plat:
+            cmd.extend(['--platform', str(plat)])
+            if verbose:
+                print(f"Added --platform {plat}")
+
         # Handle other parameters
         for key, value in run_config.items():
             if key in special_params:

@@ -11,8 +11,8 @@ import glob
 from collections import Counter
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-plt.style.use('seaborn-v0_8-colorblind')
+from file_setup import apply_mpl_style
+plt = apply_mpl_style()
 from matplotlib import cm, colormaps
 import pysam
 from Bio import SeqIO
@@ -23,8 +23,9 @@ from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
 
 
 class Coverage_Graph(Setup):
-    def __init__(self, FASTA=None, FASTQ_R1=None, FASTQ_R2=None, debug=False):
+    def __init__(self, FASTA=None, FASTQ_R1=None, FASTQ_R2=None, debug=False, platform='illumina'):
         super().__init__(FASTA=FASTA, FASTQ_R1=FASTQ_R1, FASTQ_R2=FASTQ_R2, debug=debug)
+        self.platform = platform
         self.reference = FASTA
         try:
             self.reference_name = re.sub('[._].*', '', os.path.basename(FASTA))
@@ -62,26 +63,33 @@ class Coverage_Graph(Setup):
         return temp_reference
 
     def _align_reads(self, temp_reference):
-        """Align reads to reference using BWA"""
+        """Align reads to reference using BWA (illumina) or minimap2 (ont)"""
         if self.debug:
-            print("Starting read alignment")
-            
+            print(f"Starting read alignment (platform={self.platform})")
+
         sample_name = re.sub('[._].*', '', os.path.basename(self.FASTQ_R1))
-        
-        # Index reference
-        subprocess.run(["bwa", "index", temp_reference], check=True)
-        
-        # Align reads
+
         sam_file = f"{sample_name}.sam"
         bam_file = f"{sample_name}.bam"
         sorted_bam = f"{sample_name}.sorted.bam"
-        
-        print(f"Aligning reads to reference...")
-            
-        with open(sam_file, 'w') as sam:
-            subprocess.run(["bwa", "mem", "-t", str(self.cpus), temp_reference, 
-                          self.FASTQ_R1, self.FASTQ_R2],
-                         stdout=sam, check=True)
+
+        print(f"Aligning reads to reference ({self.platform} mode)...")
+
+        if self.platform == 'ont':
+            # ONT: minimap2, single-end only
+            cmd = ["minimap2", "-a", "-x", "map-ont", "-t", str(self.cpus),
+                   temp_reference, self.FASTQ_R1]
+            with open(sam_file, 'w') as sam:
+                subprocess.run(cmd, stdout=sam, check=True)
+        else:
+            # Illumina: BWA-MEM
+            subprocess.run(["bwa", "index", temp_reference], check=True)
+            cmd = ["bwa", "mem", "-t", str(self.cpus), temp_reference, self.FASTQ_R1]
+            # BUG FIX: only append R2 if it is not None (single-end support)
+            if self.FASTQ_R2:
+                cmd.append(self.FASTQ_R2)
+            with open(sam_file, 'w') as sam:
+                subprocess.run(cmd, stdout=sam, check=True)
         
         # Convert to BAM and sort
         subprocess.run(["samtools", "view", "-bS", sam_file], 
@@ -272,26 +280,18 @@ class Coverage_Graph(Setup):
         print(r'\newpage', file=tex)
 
         # Coverage banner
-        print(r'\begin{figure}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
-        print(f'\\includegraphics[scale=1]{{{coverage_banner.banner}}}', file=tex)
-        print(r'\end{center}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-
+        print(r'\begin{figure}[H]', file=tex)
+        print(r'\centering', file=tex)
+        print(f'\\includegraphics[width=\\textwidth]{{{coverage_banner.banner}}}', file=tex)
         # Add coverage graph
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print(f'\\includegraphics[width=\\textwidth]{{{self.output_pdf}}}', file=tex)
-        print(r'\end{center}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
         print(r'\caption{Coverage depth analysis showing read alignment depth across reference sequences.}', file=tex)
         print(r'\end{figure}', file=tex)
 
-        print(r'\vspace{2cm}', file=tex)  # Add more vertical space between figure and table
+        print(r'\vspace{0.5cm}', file=tex)
 
         # Add alignment statistics table
-        print(r'\begin{table}', file=tex)
+        print(r'\begin{table}[H]', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
         print(r'\begin{tabular}{l|r|r|r}', file=tex)
         print(r'\hline', file=tex)

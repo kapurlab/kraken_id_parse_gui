@@ -3,6 +3,7 @@
 __version__ = "2.04"
 
 import os
+import shutil
 import argparse
 import textwrap
 import time
@@ -11,10 +12,11 @@ from Bio import Entrez
 
 class Downloader:
 
-    def __init__(self, accession):
+    def __init__(self, accession, cache_dir=None):
         self.entrezDbName = 'nucleotide'
         self.email = 'mickey_mouse@gmail.com'  # Consider using a real email
         self.accession = accession
+        self.cache_dir = cache_dir
 
     def gbk(self):
         Entrez.email = self.email
@@ -54,32 +56,70 @@ class Downloader:
             print(f"Error downloading gff for {self.accession}: {e}")
             raise
 
+    def _cache_path(self):
+        """Return the cached FASTA path, or None if caching is disabled."""
+        if not self.cache_dir:
+            return None
+        return os.path.join(self.cache_dir, f"{self.accession}.fasta")
+
+    def _try_cache_hit(self, write_file):
+        """Check local cache; copy to *write_file* on hit.  Returns description or None."""
+        cached = self._cache_path()
+        if not cached or not os.path.isfile(cached) or os.path.getsize(cached) == 0:
+            return None  # cache miss
+        shutil.copy2(cached, write_file)
+        print(f"Cache hit: {self.accession}")
+        with open(write_file, "r") as handle:
+            for record in SeqIO.parse(handle, "fasta"):
+                print(f"{record.description}")
+                print(f'Sequence length: {len(record.seq):,}\n')
+                return record.description
+        return None
+
+    def _write_to_cache(self, write_file):
+        """Copy a successfully-downloaded FASTA into the cache directory."""
+        cached = self._cache_path()
+        if not cached:
+            return
+        os.makedirs(self.cache_dir, exist_ok=True)
+        shutil.copy2(write_file, cached)
+
     def fasta(self):
+        writeFile = self.accession + ".fasta"
+
+        # --- try local cache first ---
+        desc = self._try_cache_hit(writeFile)
+        if desc is not None:
+            return desc
+
+        # --- download from NCBI ---
         Entrez.email = self.email
         print(f"Downloading {self.accession} FASTA")
         try:
             # Add small delay to be nice to NCBI servers
             time.sleep(0.3)
             entryData = Entrez.efetch(db=self.entrezDbName, id=self.accession, retmode="text", rettype='fasta')
-            writeFile = self.accession + ".fasta"
-            
+
             # Read the data first
             fasta_content = entryData.read()
             entryData.close()
-            
+
             # Write to file
             with open(writeFile, "w") as local_file:
                 local_file.write(fasta_content)
-            
+
             print(f"Successfully downloaded {writeFile}")
-            
+
+            # Populate cache for next time
+            self._write_to_cache(writeFile)
+
             # Parse and display sequence information
             with open(writeFile, "r") as handle:
                 for record in SeqIO.parse(handle, "fasta"):
                     print(f"{record.description}")
                     print(f'Sequence length: {len(record.seq):,}\n')
                     return record.description
-                    
+
         except Exception as e:
             print(f"Error downloading fasta for {self.accession}: {e}")
             raise

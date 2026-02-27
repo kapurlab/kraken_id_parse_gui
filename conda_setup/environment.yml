@@ -1,38 +1,39 @@
-# environment.yml
+# Environment for Kraken ID Parse GUI
+# Successfully tested on macOS with conda (not mamba due to codesigning issues)
 name: kraken_id_parse
 channels:
   - conda-forge
   - bioconda
   - defaults
+
 dependencies:
-  - python=3.8
-  - numpy=1.19.5
-  - dask=2021.6.2
-  - scikit-allel=1.3.5
-  - biopython>=1.79
-  - blast>=2.12
-  - bwa>=0.7
-  - cairosvg>=2.5
-  - kraken2>=2.1
-  - krakentools>=1.2
-  - matplotlib>=3.4
-  - pandas>=1.3
+  # Core Python and scientific packages
+  - python=3.10
   - pip
-  - pysam>=0.16
-  - pytest>=6.0
-  - pyvcf>=0.6
-  - samtools>=1.13
-  - seaborn>=0.11
-  - spades>=3.15
-  - svgwrite>=1.4
-  - seqkit
-  - openpyxl
-  - humanize
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - scipy
+  - scikit-learn
+  - pytest
+
+  # Bioinformatics core tools
+  - biopython
+  - kraken2
+  - krakentools
+  - samtools
   - krona
-  - bracken=2
-  - picard
-  - vcflib
-  - freebayes
-  - parallel
-  - pigz
-  - tk  # Adding tkinter support
+
+  # Analysis and data packages
+  - scikit-allel
+  - openpyxl
+  - h5py
+  - dask
+
+  # Additional packages via pip
+  - pip:
+      - PyVCF3>=1.0.0  # VCF file handling (pyvcf alternative)
+
+# Note: Additional bioinformatics tools can be added after initial setup:
+# conda install -n kraken_id_parse -c conda-forge -c bioconda blast bwa spades seqkit bracken picard vcflib freebayes parallel pigz

@@ -1,0 +1,14 @@
+# Minimal environment for basic functionality
+name: kraken_id_parse
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - matplotlib
+  - biopython
+  - pytest

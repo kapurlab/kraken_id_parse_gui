@@ -35,10 +35,15 @@ Upon completion, Excel and PDF files are created to provide summaries and report
 
 # Installation
 
-Follow instructions at [kraken_id_parse/conda_setup/conda_setup.md](./conda_setup/conda_setup.md)
+Follow instructions at [conda_setup/SETUP_INSTRUCTIONS.md](./conda_setup/SETUP_INSTRUCTIONS.md)
 
+Quick setup:
 ```bash
-mamba activate kraken_id_parse
+# Create environment (use conda, not mamba on macOS)
+CONDA_OVERRIDE_OSX=11.0 conda env create -f conda_setup/environment.yml
+
+# Activate environment
+conda activate kraken_id_parse
 ```
 ## Prerequisites
 
@@ -82,7 +87,7 @@ update_blastdb.pl --showall
 
 3. Download and decompress database:
 ```bash
-update_blastdb.pl --decompress ref_prok_rep_genomes
+update_blastdb.pl --source aws ref_prok_rep_genomes
 ```
 
 ### Logo

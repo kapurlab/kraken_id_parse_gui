@@ -1,4 +1,44 @@
+# OS
 .DS_Store
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
+
+# GUI — Python backend
+gui/backend/.venv/
+gui/backend/data/
+gui/backend/projects/
+
+# GUI — Node / frontend
+gui/frontend/node_modules/
+gui/frontend/dist/
+gui/frontend/.vite/
+
+# GUI — Electron
+gui/electron/node_modules/
+
+# GUI — Icon generation venv
+gui/.iconenv/
+
+# GUI — macOS app bundle
+gui/vSNP.app/
+
+# GUI — Sample data (large VCF test files)
+gui/sample_data/
+
+# GUI — Generated icon drafts
+gui/assets/icons/*_draft.*
+gui/assets/icons/*_drafts/
+gui/assets/icons/*_temp.*
+gui/Gemini_Generated_Image_*.png
+gui/vSNP.icns
+
+# Env / local config
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log

@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+gui/frontend/node_modules/
+gui/electron/node_modules/
+
+# Virtual environments
+gui/backend/.venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+gui/frontend/dist/
+gui/frontend/.vite/
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,60 @@
+# Kraken ID Parse GUI - Preset Configurations
+# This file defines preset workflows for common analysis types
+#
+# IMPORTANT: Update the database paths below to match your system!
+#
+# Common database locations:
+#   macOS/Linux: ~/k2_standard_08gb, ~/blast_databases/
+#   HPC systems: /shared/databases/, /data/databases/
+
+presets:
+  # Mycobacterium tuberculosis complex preset
+  mtb:
+    taxon: "Mycobacterium tuberculosis complex"
+    kraken_db: "~/k2_standard_08gb"  # UPDATE: Path to your Kraken2 database
+    blast_db: "~/blast_databases/ref_prok_rep_genomes"  # UPDATE: Path to your BLAST database
+    logo: "~/logo.png"  # OPTIONAL: Path to your organization logo
+
+  # Orbivirus preset
+  orbivirus:
+    taxon: "Orbivirus"
+    kraken_db: "~/k2_standard_08gb"  # UPDATE: Path to your Kraken2 database
+    blast_db: "~/blast_databases/nt_viruses"  # UPDATE: Path to your BLAST database
+    logo: "~/logo.png"  # OPTIONAL: Path to your organization logo
+
+  # Bluetongue virus preset
+  bluetongue:
+    taxon: "Bluetongue virus"
+    kraken_db: "~/k2_standard_08gb"  # UPDATE: Path to your Kraken2 database
+    blast_db: "~/blast_databases/nt_viruses"  # UPDATE: Path to your BLAST database
+    logo: "~/logo.png"  # OPTIONAL: Path to your organization logo
+
+  # Generic viral preset
+  viral:
+    taxon: "Flaviviridae"  # Example viral family
+    kraken_db: "~/k2_standard_08gb"  # UPDATE: Path to your Kraken2 database
+    blast_db: "~/blast_databases/nt_viruses"  # UPDATE: Path to your BLAST database
+    logo: "~/logo.png"  # OPTIONAL: Path to your organization logo
+
+# Global settings (optional)
+settings:
+  # Default settings that apply to all presets unless overridden
+  platform: "auto"  # auto, illumina, or ont
+  keep_extracted_reads: false
+  debug: false
+
+# Example paths for reference:
+#
+# Kraken2 databases:
+#   Standard: ~/k2_standard_08gb
+#   Large: ~/k2_standard_16gb
+#   Custom: /path/to/custom_kraken_db
+#
+# BLAST databases:
+#   Prokaryotes: ~/blast_databases/ref_prok_rep_genomes
+#   Viruses: ~/blast_databases/nt_viruses
+#   All nucleotides: ~/blast_databases/nt
+#
+# HPC examples:
+#   /shared/databases/kraken2/k2_standard
+#   /data/blast_db/ref_prok_rep_genomes

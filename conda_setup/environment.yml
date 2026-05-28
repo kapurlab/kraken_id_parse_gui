@@ -1,5 +1,5 @@
 # Environment for Kraken ID Parse GUI
-# Successfully tested on macOS with conda (not mamba due to codesigning issues)
+# Install with: conda env create -p /srv/kapurlab/tools/kraken_id_parse_gui/env -f conda_setup/environment.yml
 name: kraken_id_parse
 channels:
   - conda-forge
@@ -31,9 +31,15 @@ dependencies:
   - h5py
   - dask
 
+  # Web backend (FastAPI serves the GUI under OOD)
+  - fastapi>=0.115.0
+  - uvicorn-standard
+  - aiofiles
+
   # Additional packages via pip
   - pip:
-      - PyVCF3>=1.0.0  # VCF file handling (pyvcf alternative)
+      - PyVCF3>=1.0.0  # VCF file handling
+      - pydantic>=2.0.0
 
 # Note: Additional bioinformatics tools can be added after initial setup:
 # conda install -n kraken_id_parse -c conda-forge -c bioconda blast bwa spades seqkit bracken picard vcflib freebayes parallel pigz

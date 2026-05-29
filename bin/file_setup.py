@@ -436,13 +436,21 @@ class Latex_Report:
         """Finalize and compile the LaTeX document"""
         print(r'\end{document}', file=self.tex)
         self.tex.close()
-        
+
+        pdf_file = self.tex_file[:-4] + '.pdf' if self.tex_file.endswith('.tex') else self.tex_file + '.pdf'
+        print('  Compiling PDF report with tectonic...', flush=True)
         # tectonic auto-downloads missing packages and compiles in one pass
-        ret = os.system(f'tectonic {self.tex_file}')
-        if ret != 0:
-            # fallback to pdflatex if tectonic unavailable
+        ret = os.system(f'tectonic "{self.tex_file}"')
+        if ret != 0 or not os.path.exists(pdf_file):
+            # fallback to pdflatex if tectonic unavailable / failed
+            print(f'  tectonic did not produce a PDF (exit {ret}); trying pdflatex...', flush=True)
             for _ in range(2):
-                os.system(f'pdflatex -interaction=nonstopmode {self.tex_file} > /dev/null 2>&1')
+                os.system(f'pdflatex -interaction=nonstopmode "{self.tex_file}" > /dev/null 2>&1')
+
+        if os.path.exists(pdf_file):
+            print(f'  PDF report generated: {pdf_file}', flush=True)
+        else:
+            print('  WARNING: PDF report was NOT generated — see the LaTeX errors above.', flush=True)
 
 class Excel_Stats:
     """Generate Excel statistics reports"""

@@ -286,9 +286,7 @@ class Blast_Fasta(Setup, bcolors):
                     blast_banner = Banner(f'BLAST {basename} - Assembly Identification - continued')
                 print(r'\begin{table}[H]', file=tex)
                 print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-                print(r'\begin{center}', file=tex)
                 print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-                print(r'\end{center}', file=tex)
                 print(r'\end{adjustbox}', file=tex)
                 print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
                 print(r'\begin{tabular}{ l | p{1.3cm} | l }', file=tex)
@@ -301,11 +299,10 @@ class Blast_Fasta(Setup, bcolors):
                     description = description.replace("_", "\_")[:108]
                     print(f'{each_row[0]} & {each_row[1]} & {description} \\\\', file=tex)
                 print(r'\hline', file=tex)
-                
+                # Close tabular before the adjustbox that wraps it (LIFO); drop stray \\.
+                print(r'\end{tabular}', file=tex)
                 print(r'\end{adjustbox}', file=tex)
                 print(r'\vspace{0.1 mm}', file=tex)
-                print(r'\end{tabular}', file=tex)
-                print(r'\\', file=tex)
                 basename_slashed = basename.replace("_", "\_")
                 print(r'\begin{flushleft}Results provided by: \href{https://blast.ncbi.nlm.nih.gov/Blast.cgi}{BLAST ' + f'{basename_slashed}' + r' database}\end{flushleft}', file=tex)
                 print(r'\end{table}', file=tex)

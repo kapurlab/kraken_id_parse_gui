@@ -106,9 +106,7 @@ class Zero_Coverage(Setup):
         blast_banner = Banner(f'Coverage against {self.reference_name}')
         print(r'\begin{table}[H]', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{center}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
         print(r'\begin{tabular}{ l | l | l | l | l | l | l }', file=tex)
@@ -117,10 +115,10 @@ class Zero_Coverage(Setup):
         bam = self.bam.replace('_', '\_')
         print(f'{bam} & {self.reference_length:,} & {(self.genome_coverage*100):,.2f}\% & {self.ave_coverage:,.1f}X & {self.total_zero_coverage:,} & {self.good_snp_count:,} \\\\', file=tex)
         print(r'\hline', file=tex)
+        # Close tabular before the adjustbox that wraps it (LIFO); drop stray \\.
+        print(r'\end{tabular}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         print(r'\vspace{0.1 mm}', file=tex)
-        print(r'\end{tabular}', file=tex)
-        print(r'\\', file=tex)
         print(r'\end{table}', file=tex)
     
     def excel(self, excel_dict):

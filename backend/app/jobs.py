@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -11,6 +12,25 @@ from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# A substring that must appear in /proc/<pid>/cmdline for a PID to be accepted as
+# one of *our* pipeline processes. Guards against PID reuse (e.g. a recycled or
+# kernel PID) being mistaken for a live job after a uvicorn restart.
+_PIPELINE_MARKER = "kraken_id_parse"
+
+
+def _pid_is_pipeline(pid: int) -> bool:
+    """True only if `pid` is alive AND its command line looks like our pipeline.
+
+    Reading /proc/<pid>/cmdline both proves liveness and confirms identity, so a
+    reused PID (or an unrelated/kernel PID) is never mistaken for a running job.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            cmdline = fh.read().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return False
+    return _PIPELINE_MARKER in cmdline
+
 
 class JobManager:
     def __init__(self, jobs_dir: Path):
@@ -20,80 +40,146 @@ class JobManager:
         self._jobs: Dict[str, Dict] = {}
         self._restore_jobs()
 
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+    def _state_path(self, job_id: str) -> Path:
+        return self.jobs_dir / f"{job_id}.json"
+
+    def _pid_path(self, job_id: str) -> Path:
+        return self.jobs_dir / f"{job_id}.pid"
+
+    def _exit_path(self, job_id: str) -> Path:
+        return self.jobs_dir / f"{job_id}.exit"
+
+    def _read_exit_code(self, job_id: str) -> Optional[int]:
+        """Return the exit code the pipeline shell recorded, or None if absent."""
+        try:
+            text = self._exit_path(job_id).read_text().strip()
+            return int(text)
+        except (OSError, ValueError):
+            return None
+
+    def _write_state(self, job: Dict) -> None:
+        try:
+            self._state_path(job["id"]).write_text(json.dumps(job))
+        except OSError:
+            logger.exception("Failed to persist state for job %s", job.get("id"))
+
+    # ------------------------------------------------------------------
+    # Restore after a uvicorn restart
+    # ------------------------------------------------------------------
     def _restore_jobs(self) -> None:
-        """Re-attach to any pipeline subprocess that outlived a previous uvicorn instance."""
-        for state_file in self.jobs_dir.glob("*.json"):
+        """Re-load persisted jobs and re-attach to any pipeline still running.
+
+        Completed jobs are loaded back into memory too, so the log/reconnect
+        endpoints keep working after a uvicorn restart. Jobs marked running are
+        only trusted if their PID is alive AND still looks like our pipeline.
+        """
+        for state_file in sorted(self.jobs_dir.glob("*.json")):
             try:
                 job = json.loads(state_file.read_text())
             except (json.JSONDecodeError, OSError):
                 continue
-            if job.get("status") != "running":
+            job_id = job.get("id")
+            if not job_id:
                 continue
-            job_id = job["id"]
-            pid_path = self.jobs_dir / f"{job_id}.pid"
-            alive = False
+
+            if job.get("status") != "running":
+                with self._lock:
+                    self._jobs[job_id] = job
+                continue
+
+            pid_path = self._pid_path(job_id)
             pid = None
             if pid_path.exists():
                 try:
                     pid = int(pid_path.read_text().strip())
-                    os.kill(pid, 0)
-                    alive = True
                 except (ValueError, OSError):
-                    pass
-            if alive:
+                    pid = None
+
+            if pid is not None and _pid_is_pipeline(pid):
                 logger.info("Restored running job %s (pid %s)", job_id, pid)
                 with self._lock:
                     self._jobs[job_id] = job
-                t = threading.Thread(
+                threading.Thread(
                     target=self._watch_pid,
-                    args=(job_id, pid, Path(job["log_path"]), pid_path, state_file),
+                    args=(job_id, pid, Path(job["log_path"])),
                     daemon=True,
-                )
-                t.start()
+                ).start()
             else:
+                # Process is gone — finalize the job from whatever it left behind.
                 pid_path.unlink(missing_ok=True)
-                job["status"] = "failed"
-                job["exit_code"] = -1
-                try:
-                    state_file.write_text(json.dumps(job))
-                except OSError:
-                    pass
+                self._finalize(job_id, Path(job["log_path"]), in_memory_job=job)
 
-    def _watch_pid(
-        self, job_id: str, pid: int, log_path: Path, pid_path: Path, state_path: Path
+    # ------------------------------------------------------------------
+    # Completion handling (shared by _run, _watch_pid, _restore_jobs)
+    # ------------------------------------------------------------------
+    def _finalize(
+        self,
+        job_id: str,
+        log_path: Path,
+        exit_code: Optional[int] = None,
+        in_memory_job: Optional[Dict] = None,
     ) -> None:
-        """Poll until a detached subprocess exits, then update job state."""
-        while True:
+        """Mark a job finished, deriving success from the recorded exit code.
+
+        Falls back to the log's completion marker when no exit file exists
+        (e.g. the originating uvicorn died before it could be written).
+        """
+        if exit_code is None:
+            exit_code = self._read_exit_code(job_id)
+
+        if exit_code is None:
+            # No exit file: trust the log marker the pipeline writes on clean exit.
             try:
-                os.kill(pid, 0)
-                time.sleep(2)
+                has_marker = "# finished_at_utc:" in log_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
             except OSError:
-                break
-        pid_path.unlink(missing_ok=True)
-        finished_at = datetime.now(timezone.utc)
-        # Determine success by checking if the pipeline wrote its completion marker
-        status = "failed"
+                has_marker = False
+            status = "succeeded" if has_marker else "failed"
+            exit_code = 0 if status == "succeeded" else -1
+        else:
+            status = "succeeded" if exit_code == 0 else "failed"
+
+        # Ensure the log carries a completion marker so the SSE stream emits
+        # [DONE] even for jobs whose original writer (uvicorn) had died.
         try:
-            if "# finished_at_utc:" in log_path.read_text(encoding="utf-8", errors="replace"):
-                status = "succeeded"
+            if "# finished_at_utc:" not in log_path.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                with open(log_path, "a", encoding="utf-8") as log:
+                    log.write(
+                        f"\n# finished_at_utc: {datetime.now(timezone.utc).isoformat()}\n"
+                    )
+                    log.write(f"# exit_code: {exit_code}\n")
         except OSError:
             pass
-        exit_code = 0 if status == "succeeded" else -1
+
+        finished_at = datetime.now(timezone.utc).isoformat()
         with self._lock:
-            job = self._jobs.get(job_id)
-            if job:
+            job = self._jobs.get(job_id) or in_memory_job
+            if job is not None:
                 job["status"] = status
                 job["exit_code"] = exit_code
-                job["finished_at"] = finished_at.isoformat()
-        try:
-            data = json.loads(state_path.read_text())
-            data["status"] = status
-            data["exit_code"] = exit_code
-            data["finished_at"] = finished_at.isoformat()
-            state_path.write_text(json.dumps(data))
-        except OSError:
-            pass
+                if not job.get("finished_at"):
+                    job["finished_at"] = finished_at
+                self._jobs[job_id] = job
+                self._write_state(job)
 
+        self._pid_path(job_id).unlink(missing_ok=True)
+        self._exit_path(job_id).unlink(missing_ok=True)
+
+    def _watch_pid(self, job_id: str, pid: int, log_path: Path) -> None:
+        """Poll a detached pipeline PID until it exits, then finalize the job."""
+        while _pid_is_pipeline(pid):
+            time.sleep(2)
+        self._finalize(job_id, log_path)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     def start_job(
         self,
         name: str,
@@ -103,8 +189,6 @@ class JobManager:
     ) -> str:
         job_id = uuid.uuid4().hex
         log_path = self.jobs_dir / f"{job_id}.log"
-        pid_path = self.jobs_dir / f"{job_id}.pid"
-        state_path = self.jobs_dir / f"{job_id}.json"
         started_at = datetime.now(timezone.utc)
         job = {
             "id": job_id,
@@ -118,25 +202,37 @@ class JobManager:
             "finished_at": None,
             "duration_seconds": None,
         }
-        state_path.write_text(json.dumps(job))
+        self._write_state(job)
         with self._lock:
             self._jobs[job_id] = job
-        thread = threading.Thread(
+        threading.Thread(
             target=self._run,
-            args=(job_id, command, cwd, env, log_path, pid_path, state_path),
+            args=(job_id, command, cwd, env, log_path),
             daemon=True,
-        )
-        thread.start()
+        ).start()
         return job_id
 
     def get_job(self, job_id: str) -> Optional[Dict]:
         with self._lock:
-            return dict(self._jobs[job_id]) if job_id in self._jobs else None
+            if job_id in self._jobs:
+                return dict(self._jobs[job_id])
+        # Fall back to the on-disk state (e.g. a job from a previous process
+        # that was not yet loaded). Keeps /log and /results working.
+        try:
+            job = json.loads(self._state_path(job_id).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        with self._lock:
+            self._jobs[job_id] = job
+        return dict(job)
 
     def list_jobs(self) -> list:
         with self._lock:
             return [dict(j) for j in self._jobs.values()]
 
+    # ------------------------------------------------------------------
+    # Run a job in this process
+    # ------------------------------------------------------------------
     def _run(
         self,
         job_id: str,
@@ -144,26 +240,46 @@ class JobManager:
         cwd: Optional[Path],
         env: Optional[Dict[str, str]],
         log_path: Path,
-        pid_path: Path,
-        state_path: Path,
     ) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path = self._pid_path(job_id)
+        exit_path = self._exit_path(job_id)
+        exit_path.unlink(missing_ok=True)
+
+        # The pipeline shell records its own exit code to a file *before*
+        # returning. That file is the source of truth for success/failure and
+        # survives this uvicorn process being killed, so a job that finishes
+        # after a restart can still be finalized correctly by _watch_pid.
+        wrapped = (
+            f"{command}\n"
+            f"__ec=$?\n"
+            f'echo "$__ec" > {shlex.quote(str(exit_path))}\n'
+            f"exit $__ec\n"
+        )
+
         with open(log_path, "w", encoding="utf-8") as log:
             started_at = datetime.now(timezone.utc)
             log.write(f"# started_at_utc: {started_at.isoformat()}\n")
             log.write(f"$ {command}\n\n")
             log.flush()
-            process = subprocess.Popen(
-                command,
-                cwd=str(cwd) if cwd else None,
-                env={**os.environ, **(env or {})},
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                shell=True,
-                text=True,
-                start_new_session=True,  # detach from uvicorn's process group
-                stdin=subprocess.DEVNULL,
-            )
+            try:
+                process = subprocess.Popen(
+                    wrapped,
+                    cwd=str(cwd) if cwd else None,
+                    env={**os.environ, **(env or {})},
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    shell=True,
+                    text=True,
+                    start_new_session=True,  # own process group/session: survives
+                    stdin=subprocess.DEVNULL,  # tmux SIGHUP on OOD session teardown
+                )
+            except OSError as exc:
+                log.write(f"\nERROR: failed to launch pipeline: {exc}\n")
+                log.flush()
+                self._finalize(job_id, log_path, exit_code=-1)
+                return
+
             pid_path.write_text(str(process.pid))
             exit_code = process.wait()
             finished_at = datetime.now(timezone.utc)
@@ -171,21 +287,10 @@ class JobManager:
             log.write(f"\n# finished_at_utc: {finished_at.isoformat()}\n")
             log.write(f"# duration_seconds: {duration:.2f}\n")
             log.flush()
-        pid_path.unlink(missing_ok=True)
-        status = "succeeded" if exit_code == 0 else "failed"
+
         with self._lock:
             job = self._jobs.get(job_id)
-            if job:
-                job["exit_code"] = exit_code
-                job["status"] = status
-                job["finished_at"] = finished_at.isoformat()
+            if job is not None:
                 job["duration_seconds"] = duration
-        try:
-            data = json.loads(state_path.read_text())
-            data["exit_code"] = exit_code
-            data["status"] = status
-            data["finished_at"] = finished_at.isoformat()
-            data["duration_seconds"] = duration
-            state_path.write_text(json.dumps(data))
-        except OSError:
-            pass
+                job["finished_at"] = finished_at.isoformat()
+        self._finalize(job_id, log_path, exit_code=exit_code)

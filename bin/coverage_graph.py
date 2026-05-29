@@ -274,16 +274,12 @@ class Coverage_Graph(Setup):
         # Coverage banner
         print(r'\begin{figure}', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print(f'\\includegraphics[scale=1]{{{coverage_banner.banner}}}', file=tex)
-        print(r'\end{center}', file=tex)
         print(r'\end{adjustbox}', file=tex)
 
         # Add coverage graph
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print(f'\\includegraphics[width=\\textwidth]{{{self.output_pdf}}}', file=tex)
-        print(r'\end{center}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         print(r'\caption{Coverage depth analysis showing read alignment depth across reference sequences.}', file=tex)
         print(r'\end{figure}', file=tex)

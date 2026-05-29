@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiofiles
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -268,11 +268,27 @@ def api_run(payload: RunPayload):
 
     # Output directory: <project>/kraken/<sample_name>/
     run_dir = project_dir / "kraken" / sample_name
+
+    # Refuse to start a second pipeline in the same output directory: two runs
+    # sharing a working directory race on the same temp/output folders and can
+    # delete each other's CWD mid-run (manifests as "getcwd() failed" and
+    # spurious SPAdes/Excel failures).
+    for existing in job_manager.list_jobs():
+        if existing.get("status") == "running" and existing.get("cwd") == str(run_dir):
+            raise HTTPException(
+                409,
+                f"A run is already in progress for {sample_name} "
+                f"(job {existing['id'][:8]}). Wait for it to finish before re-running.",
+            )
+
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Build command
     script = _BIN_DIR / "kraken_id_parse.py"
-    cmd_parts = [f'python "{script}"', f'-r1 "{payload.r1}"']
+    # -u: unbuffered stdout/stderr so the parent script's progress prints stream
+    # to the log in real time and in order (otherwise Python block-buffers when
+    # stdout is a pipe and the log appears to freeze between subprocess outputs).
+    cmd_parts = [f'python -u "{script}"', f'-r1 "{payload.r1}"']
     if payload.r2:
         r2 = Path(payload.r2)
         if r2.exists():
@@ -287,6 +303,7 @@ def api_run(payload: RunPayload):
     env = {
         "PYTHONPATH": str(_BIN_DIR),
         "PATH": os.environ.get("PATH", ""),
+        "PYTHONUNBUFFERED": "1",  # belt-and-suspenders with `python -u`
     }
 
     job_name = f"{payload.project}/{sample_name} — {payload.taxon}"
@@ -343,29 +360,140 @@ async def api_job_log(job_id: str, request: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# File extensions a browser can render in a tab (open inline); everything else
+# is sent as a download. Maps extension -> MIME type.
+_INLINE_MEDIA = {
+    ".pdf": "application/pdf",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".txt": "text/plain",
+    ".log": "text/plain",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".csv": "text/plain",
+}
+_DOWNLOAD_MEDIA = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".vcf": "text/plain",
+    ".fasta": "text/plain",
+    ".fa": "text/plain",
+    ".gz": "application/gzip",
+}
+# Files surfaced first in the Results pane (the ones users actually want).
+_PRIORITY_SUFFIXES = ("_report.pdf", "_stats.xlsx", "_krona.html")
+
+
+def _can_open_inline(name: str) -> bool:
+    return Path(name).suffix.lower() in _INLINE_MEDIA
+
+
+def _media_type_for(name: str) -> str:
+    ext = Path(name).suffix.lower()
+    return _INLINE_MEDIA.get(ext) or _DOWNLOAD_MEDIA.get(ext) or "application/octet-stream"
+
+
 @app.get("/api/jobs/{job_id}/results")
 def api_job_results(job_id: str):
-    """List output files in the job's run directory."""
+    """List output files in the job's run directory, plus the pipeline log.
+
+    Each entry carries `openable` (can the browser render it inline) so the UI
+    can show an Open link; everything is downloadable via /file.
+    """
     job = job_manager.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    cwd = job.get("cwd")
-    if not cwd or not Path(cwd).is_dir():
-        return JSONResponse([])
-    run_dir = Path(cwd)
+
     files = []
-    for p in sorted(run_dir.rglob("*")):
-        if p.is_file() and not p.name.endswith(".log"):
-            rel = p.relative_to(run_dir)
-            size = p.stat().st_size
-            files.append({"name": str(rel), "size": size})
+    cwd = job.get("cwd")
+    if cwd and Path(cwd).is_dir():
+        run_dir = Path(cwd)
+        for p in sorted(run_dir.rglob("*")):
+            if p.is_file() and not p.name.endswith(".log"):
+                rel = str(p.relative_to(run_dir))
+                files.append(
+                    {"name": rel, "size": p.stat().st_size, "openable": _can_open_inline(rel)}
+                )
+
+    # Surface the pipeline log itself (lives outside run_dir, in the jobs dir).
+    log_path = Path(job.get("log_path", ""))
+    if log_path.is_file():
+        files.append(
+            {
+                "name": "pipeline_log.txt",
+                "size": log_path.stat().st_size,
+                "openable": True,
+                "is_log": True,
+            }
+        )
+
+    # Sort: priority files first (PDF, Excel, Krona), then the rest, log last.
+    def sort_key(f):
+        if f.get("is_log"):
+            return (2, f["name"])
+        if any(f["name"].endswith(s) for s in _PRIORITY_SUFFIXES):
+            return (0, f["name"])
+        return (1, f["name"])
+
+    files.sort(key=sort_key)
     return JSONResponse(files)
+
+
+@app.get("/api/jobs/{job_id}/file")
+def api_job_file(job_id: str, path: str = Query(...), inline: int = 0):
+    """Serve a single result file. `inline=1` renders in the browser (PDF/HTML/
+    text/images); otherwise it downloads as an attachment.
+
+    `path` is relative to the job's run directory, except the sentinel
+    "pipeline_log.txt" which maps to the job's log file.
+    """
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+
+    if path == "pipeline_log.txt":
+        target = Path(job.get("log_path", ""))
+        display_name = f"{job_id[:8]}_pipeline_log.txt"
+    else:
+        cwd = job.get("cwd")
+        if not cwd:
+            raise HTTPException(404, "No run directory for job")
+        run_dir = Path(cwd).resolve()
+        target = (run_dir / path).resolve()
+        # Path-traversal guard: target must stay inside the run directory.
+        if run_dir != target and run_dir not in target.parents:
+            raise HTTPException(403, "Path outside run directory")
+        display_name = target.name
+
+    if not target.is_file():
+        raise HTTPException(404, f"File not found: {path}")
+
+    media_type = _media_type_for(target.name)
+    want_inline = bool(inline) and _can_open_inline(target.name)
+    disposition = "inline" if want_inline else "attachment"
+    headers = {"Content-Disposition": f'{disposition}; filename="{display_name}"'}
+    return FileResponse(target, media_type=media_type, headers=headers)
 
 
 # ---------------------------------------------------------------------------
 # Static frontend — must be last (catches everything not matched above)
 # ---------------------------------------------------------------------------
 if _FRONTEND_DIST.is_dir():
+    # Serve index.html explicitly with no-cache so the browser (and the OOD
+    # rnode proxy) always revalidate it. The hashed assets it points to are
+    # immutable and safe to cache; a stale index.html, however, would keep
+    # referencing old asset hashes after a rebuild and silently break styling.
+    _INDEX_HTML = _FRONTEND_DIST / "index.html"
+
+    @app.get("/")
+    def index():
+        return FileResponse(
+            _INDEX_HTML,
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
+
     app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="static")
 else:
     @app.get("/")

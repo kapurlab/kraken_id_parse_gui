@@ -196,9 +196,7 @@ class Alignment(Setup):
         blast_banner = Banner(f'Read Mapping against {self.reference_name}')
         print(r'\begin{table}[H]', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{center}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
         
@@ -229,7 +227,6 @@ class Alignment(Setup):
         print(r'\end{tabular}', file=tex)
 
         print(r'\end{adjustbox}', file=tex)
-        print(r'\\', file=tex)
         print(r'\end{table}', file=tex)
     
     def excel(self, excel_dict):

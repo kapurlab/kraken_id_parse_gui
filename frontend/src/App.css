@@ -90,7 +90,7 @@
 
 /* Log panel */
 .log-panel { flex: 1; display: flex; flex-direction: column;
-  background: #1a2536; min-height: 0; border-top: 2px solid #0f172a; overflow: hidden; }
+  background: #1a2536; height: 0; border-top: 2px solid #0f172a; overflow: hidden; }
 .log-header { padding: 8px 14px; display: flex; align-items: center; gap: 8px;
   background: #0f172a; flex-shrink: 0; min-height: 36px; }
 .log-title { font-size: 12px; font-weight: 600; color: #94a3b8;
@@ -105,7 +105,7 @@
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 .log-content { flex: 1; overflow-y: scroll; padding: 12px 14px;
   font-family: 'IBM Plex Mono', monospace; font-size: 12px;
-  line-height: 1.6; color: #94a3b8; min-height: 0; }
+  line-height: 1.6; color: #94a3b8; height: 0; }
 .log-content::-webkit-scrollbar { width: 10px; }
 .log-content::-webkit-scrollbar-track { background: #0f172a; }
 .log-content::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }

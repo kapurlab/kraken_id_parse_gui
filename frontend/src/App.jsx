@@ -194,7 +194,7 @@ export default function App() {
   const logRef = useRef(null);
   const eventSourceRef = useRef(null);
 
-  // Load config & projects on mount
+  // Load config & projects on mount; reconnect to any pipeline still running
   useEffect(() => {
     fetch("./api/config")
       .then((r) => r.json())
@@ -205,6 +205,18 @@ export default function App() {
       })
       .catch(() => {});
     loadProjects();
+    fetch("./api/jobs")
+      .then((r) => r.json())
+      .then((jobs) => {
+        const live = jobs.find((j) => j.status === "running");
+        if (live) {
+          setJobId(live.id);
+          setJobStatus("running");
+          setRunning(true);
+          streamLog(live.id);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   function loadProjects() {

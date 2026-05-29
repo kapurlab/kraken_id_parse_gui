@@ -13,7 +13,7 @@ from datetime import datetime
 
 from Bio import SeqIO
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
 
 
 class Blast_Fasta(Setup, bcolors):
@@ -136,11 +136,14 @@ class Blast_Fasta(Setup, bcolors):
                     os.system('sbatch -W ./batch.sh')
                 else:
                     # Sequential processing without SLURM
-                    for split_file in self.split_file_list:
+                    total_files = len(self.split_file_list)
+                    for i, split_file in enumerate(self.split_file_list, 1):
+                        print(f'  BLAST chunk {i}/{total_files}: {split_file}', flush=True)
                         os.system(f'blastn -query {split_file} -db {blast_db} '
                                 f'-out {split_file}_blastout.txt -outfmt "{format}" '
                                 f'-num_alignments {num_alignment} -num_threads {self.cpus}')
-                
+                        print(f'  BLAST chunk {i}/{total_files} complete', flush=True)
+
                 # Concatenate results
                 concatenation = f'{self.sample_name}_blast_out.txt'
                 with open(concatenation, 'wb') as outfile:
@@ -568,7 +571,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     for files in ('*.aux', '*.log', '*tex', '*png', '*out'):
         files_grab.extend(glob.glob(files))
     for each in files_grab:
-        shutil.move(each, temp_dir)
+        safe_move(each, temp_dir)
 
     if args.debug is False:
         shutil.rmtree(temp_dir)

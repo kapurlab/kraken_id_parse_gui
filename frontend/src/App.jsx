@@ -1,15 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import "./App.css";
 
-// ---------------------------------------------------------------------------
-// Styles (injected as a <style> tag so there's no separate CSS file to build)
-// ---------------------------------------------------------------------------
-const CSS = `
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px;
-  background: #f4f6f8; color: #1a2536; height: 100vh; overflow: hidden; }
-#root { height: 100vh; display: flex; flex-direction: column; }
-
-/* Header */
+const _UNUSED_CSS_START = `_`;
+const _dummy = `
 .header { background: #1c3754; color: #fff; padding: 0 16px;
   display: flex; align-items: center; gap: 12px; height: 48px; flex-shrink: 0; }
 .header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.02em; }
@@ -21,11 +14,11 @@ body { font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px;
 .header-settings:hover { background: rgba(255,255,255,0.1); }
 
 /* Layout */
-.layout { display: flex; flex: 1; overflow: hidden; gap: 0; }
+.layout { display: flex; flex: 1; overflow: hidden; gap: 0; min-height: 0; }
 
 /* Left panel — project/sample browser */
 .panel-left { width: 280px; flex-shrink: 0; background: #fff;
-  border-right: 1px solid #dde2e8; display: flex; flex-direction: column; overflow: hidden; }
+  border-right: 1px solid #dde2e8; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 .panel-title { padding: 10px 14px; font-size: 12px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.06em; color: #64748b;
   border-bottom: 1px solid #e8ecf0; background: #f8fafc; flex-shrink: 0; }
@@ -35,8 +28,12 @@ body { font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px;
   align-items: center; gap: 8px; transition: background 0.1s; }
 .project-header:hover { background: #f0f4f8; }
 .project-header.selected { background: #e8f0fe; }
-.project-name { font-weight: 600; font-size: 13px; flex: 1; min-width: 0;
+.project-name { font-weight: 600; font-size: 13px; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-name-block { flex: 1; min-width: 0; overflow: hidden; }
+.project-path { font-size: 10px; color: #94a3b8; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left;
+  margin-top: 1px; }
 .project-meta { font-size: 11px; color: #64748b; }
 .scope-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px;
   font-weight: 600; flex-shrink: 0; }
@@ -48,16 +45,23 @@ body { font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px;
   transition: background 0.1s; }
 .sample-item:hover { background: #eff6ff; }
 .sample-item.active { background: #dbeafe; border-left: 3px solid #2563eb; padding-left: 25px; }
-.sample-name { font-size: 12px; font-weight: 500; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; }
-.sample-files { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+.sample-name { font-size: 12px; font-weight: 600; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.sample-name-row { display: flex; align-items: center; gap: 6px; }
+.sample-files { font-size: 11px; color: #94a3b8; margin-top: 3px; }
+.sample-file-row { display: flex; align-items: baseline; gap: 4px; margin-top: 2px; }
+.file-label { font-size: 10px; font-weight: 700; color: #cbd5e1; flex-shrink: 0; min-width: 14px; }
+.file-name { font-size: 11px; color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.read-badge { font-size: 10px; padding: 1px 5px; border-radius: 8px; font-weight: 700; flex-shrink: 0; line-height: 1.4; }
+.badge-pe { background: #dbeafe; color: #1d4ed8; }
+.badge-se { background: #f0fdf4; color: #166534; }
 .no-projects { padding: 24px 14px; color: #64748b; font-size: 13px; text-align: center; }
 .loading-text { padding: 16px; color: #64748b; font-size: 13px; }
 
 /* Center panel — run form */
-.panel-center { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.panel-center { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 .run-form { padding: 16px; border-bottom: 1px solid #dde2e8; background: #fff;
-  flex-shrink: 0; overflow-y: auto; max-height: 60%; }
+  flex-shrink: 0; overflow-y: auto; max-height: 55%; }
 .form-section { margin-bottom: 16px; }
 .form-label { font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 4px; display: block; }
 .form-input { width: 100%; padding: 7px 10px; border: 1px solid #cbd5e1;
@@ -85,19 +89,25 @@ body { font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px;
 
 /* Log panel */
 .log-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden;
-  background: #1a2536; }
+  background: #1a2536; min-height: 120px; border-top: 2px solid #0f172a; }
 .log-header { padding: 8px 14px; display: flex; align-items: center; gap: 8px;
-  background: #0f172a; flex-shrink: 0; }
+  background: #0f172a; flex-shrink: 0; min-height: 36px; }
 .log-title { font-size: 12px; font-weight: 600; color: #94a3b8;
-  text-transform: uppercase; letter-spacing: 0.06em; }
+  text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; }
+.log-step { font-size: 12px; color: #60a5fa; flex: 1; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .status-running { background: #f59e0b; animation: pulse 1s infinite; }
 .status-succeeded { background: #22c55e; }
 .status-failed { background: #ef4444; }
 .status-idle { background: #475569; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-.log-content { flex: 1; overflow-y: auto; padding: 12px 14px; font-family: 'IBM Plex Mono', monospace;
-  font-size: 12px; line-height: 1.6; color: #94a3b8; }
+.log-content { flex: 1; overflow-y: scroll; padding: 12px 14px; font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px; line-height: 1.6; color: #94a3b8; min-height: 0; }
+.log-content::-webkit-scrollbar { width: 8px; }
+.log-content::-webkit-scrollbar-track { background: #0f172a; }
+.log-content::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+.log-content::-webkit-scrollbar-thumb:hover { background: #475569; }
 .log-line { white-space: pre-wrap; word-break: break-all; }
 .log-line.cmd { color: #60a5fa; }
 .log-line.done { color: #22c55e; font-weight: 600; }
@@ -106,7 +116,7 @@ body { font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px;
 
 /* Right panel — results */
 .panel-right { width: 260px; flex-shrink: 0; background: #fff;
-  border-left: 1px solid #dde2e8; display: flex; flex-direction: column; overflow: hidden; }
+  border-left: 1px solid #dde2e8; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 .results-list { flex: 1; overflow-y: auto; }
 .result-file { padding: 8px 14px; border-bottom: 1px solid #e8ecf0;
   display: flex; align-items: flex-start; gap: 8px; font-size: 12px; }
@@ -180,6 +190,7 @@ export default function App() {
   const [results, setResults] = useState([]);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState({});
+  const [currentStep, setCurrentStep] = useState("");
   const logRef = useRef(null);
   const eventSourceRef = useRef(null);
 
@@ -240,6 +251,7 @@ export default function App() {
     setJobStatus("running");
     setLogLines([]);
     setResults([]);
+    setCurrentStep("");
 
     fetch("./api/run", {
       method: "POST",
@@ -280,10 +292,19 @@ export default function App() {
           .then((r) => r.json())
           .then((job) => {
             setJobStatus(job.status);
+            setCurrentStep("");
             if (job.status === "succeeded") loadResults(id);
           });
       } else {
         setLogLines((prev) => [...prev, data]);
+        // Extract current pipeline step for the header
+        if (/Step \d+:/i.test(data) ||
+            /Starting bioinformatics/i.test(data) ||
+            /Generating analysis reports/i.test(data) ||
+            /Pipeline completed/i.test(data) ||
+            /Downloading.*reference/i.test(data)) {
+          setCurrentStep(data.trim().replace(/^#+\s*/, ""));
+        }
       }
     };
     es.onerror = () => {
@@ -329,8 +350,7 @@ export default function App() {
 
   return (
     <>
-      <style>{CSS}</style>
-      <div id="root" style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+      <div className="app-root">
         {/* Header */}
         <header className="header">
           <span style={{ fontSize: 20 }}>🦠</span>
@@ -368,7 +388,12 @@ export default function App() {
                     onClick={() => toggleProject(proj.name)}
                   >
                     <span className="expand-icon">{expanded[proj.name] ? "▾" : "▸"}</span>
-                    <span className="project-name" title={proj.name}>{proj.name}</span>
+                    <div className="project-name-block">
+                      <div className="project-name" title={proj.name}>{proj.name}</div>
+                      {proj.path && (
+                        <div className="project-path" title={proj.path}>{proj.path}</div>
+                      )}
+                    </div>
                     <span className={`scope-badge scope-${proj.scope}`}>{proj.scope}</span>
                   </div>
                   <div className="project-meta" style={{ paddingLeft: 32, paddingBottom: expanded[proj.name] ? 0 : 6, fontSize: 11, color: "#94a3b8" }}>
@@ -385,14 +410,36 @@ export default function App() {
                       )}
                       {samples[proj.name]?.map((s) => (
                         <div
-                          key={s.sample}
+                          key={s.r1}
                           className={`sample-item ${selectedSample?.r1 === s.r1 ? "active" : ""}`}
                           onClick={() => selectSample(proj.name, s)}
                         >
-                          <div className="sample-name" title={s.sample}>{s.sample}</div>
+                          <div className="sample-name-row">
+                            <div className="sample-name" title={s.sample}>{s.sample}</div>
+                            <span className={`read-badge ${s.paired ? "badge-pe" : "badge-se"}`}>
+                              {s.paired ? "PE" : "SE"}
+                            </span>
+                          </div>
                           <div className="sample-files">
-                            R1 {s.r1_name}
-                            {s.r2_name && <><br />R2 {s.r2_name}</>}
+                            {s.paired ? (
+                              <>
+                                <div className="sample-file-row">
+                                  <span className="file-label">R1</span>
+                                  <span className="file-name" title={s.r1_name}>{s.r1_name}</span>
+                                  <span style={{ fontSize: 10, color: "#64748b", flexShrink: 0 }}>{fmtSize(s.r1_size)}</span>
+                                </div>
+                                <div className="sample-file-row">
+                                  <span className="file-label">R2</span>
+                                  <span className="file-name" title={s.r2_name}>{s.r2_name}</span>
+                                  <span style={{ fontSize: 10, color: "#64748b", flexShrink: 0 }}>{fmtSize(s.r2_size)}</span>
+                                </div>
+                              </>
+                            ) : (
+                              <div className="sample-file-row">
+                                <span className="file-name" title={s.r1_name}>{s.r1_name}</span>
+                                <span style={{ fontSize: 10, color: "#64748b", flexShrink: 0 }}>{fmtSize(s.r1_size)}</span>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
@@ -410,12 +457,27 @@ export default function App() {
               {selectedSample ? (
                 <div className="selected-sample-box">
                   <div className="selected-sample-title">Selected Sample</div>
-                  <div className="selected-sample-name">{selectedSample.sample}</div>
-                  <div className="selected-sample-path">{selectedSample.r1_name}</div>
-                  {selectedSample.r2_name && (
-                    <div className="selected-sample-path">{selectedSample.r2_name}</div>
-                  )}
-                  <div style={{ fontSize: 11, color: "#1d4ed8", marginTop: 4 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <div className="selected-sample-name">{selectedSample.sample}</div>
+                    <span className={`read-badge ${selectedSample.paired ? "badge-pe" : "badge-se"}`}>
+                      {selectedSample.paired ? "Paired-end" : "Single-end"}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#475569" }}>
+                    <div className="sample-file-row" style={{ marginBottom: 1 }}>
+                      {selectedSample.paired && <span className="file-label" style={{ color: "#93c5fd" }}>R1</span>}
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                            title={selectedSample.r1_name}>{selectedSample.r1_name}</span>
+                    </div>
+                    {selectedSample.r2_name && (
+                      <div className="sample-file-row">
+                        <span className="file-label" style={{ color: "#93c5fd" }}>R2</span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                              title={selectedSample.r2_name}>{selectedSample.r2_name}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#1d4ed8", marginTop: 5 }}>
                     Project: {selectedSample.project}
                   </div>
                 </div>
@@ -487,13 +549,16 @@ export default function App() {
               <div className="log-header">
                 <div className={`status-dot status-${jobStatus}`} />
                 <span className="log-title">
-                  {jobStatus === "idle" && "Log output"}
-                  {jobStatus === "running" && "Running…"}
-                  {jobStatus === "succeeded" && "Completed"}
+                  {jobStatus === "idle" && "Log"}
+                  {jobStatus === "running" && "Running"}
+                  {jobStatus === "succeeded" && "Done"}
                   {jobStatus === "failed" && "Failed"}
                 </span>
+                {jobStatus === "running" && currentStep && (
+                  <span className="log-step" title={currentStep}>— {currentStep}</span>
+                )}
                 {jobId && (
-                  <span style={{ fontSize: 11, color: "#475569", marginLeft: 8 }}>
+                  <span style={{ fontSize: 11, color: "#475569", marginLeft: "auto", flexShrink: 0 }}>
                     job {jobId.slice(0, 8)}
                   </span>
                 )}

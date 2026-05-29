@@ -13,11 +13,23 @@ import zipfile
 import pandas as pd
 from Bio import SeqIO
 
+from pathlib import Path
+
 from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
 from fastq_stats_seqkit import FASTQ_Stats
 # from vsnp3_vcf_annotation import VCF_Annotation
 from assembly import Assemble
 from zero_coverage import Zero_Coverage
+
+
+def _safe_move(src, dst):
+    """shutil.move that silently overwrites an existing destination."""
+    src_path = Path(src)
+    dst_path = Path(dst)
+    actual_dst = dst_path / src_path.name if dst_path.is_dir() else dst_path
+    if actual_dst.exists():
+        shutil.rmtree(actual_dst) if actual_dst.is_dir() else actual_dst.unlink()
+    shutil.move(str(src), str(dst))
 
 
 
@@ -107,8 +119,8 @@ class Alignment(Setup):
             os.system(f'samtools fastq -f4 -1 {unmapped_read1} -2 {unmapped_read2} --reference {reference} --threads 8 {nodup_bamfile} 2> /dev/null' )
             os.system(f'pigz {unmapped_read1}')
             os.system(f'pigz {unmapped_read2}')
-            shutil.move(f'{unmapped_read1}.gz', unmapped_dir)
-            shutil.move(f'{unmapped_read2}.gz', unmapped_dir)
+            _safe_move(f'{unmapped_read1}.gz', unmapped_dir)
+            _safe_move(f'{unmapped_read2}.gz', unmapped_dir)
             self.unmapped_read1 = f'{self.cwd}/{unmapped_dir}/{unmapped_read1}.gz'
             self.unmapped_read2 = f'{self.cwd}/{unmapped_dir}/{unmapped_read2}.gz'
             self.unmapped_read_list = [self.unmapped_read1, self.unmapped_read2]
@@ -117,7 +129,7 @@ class Alignment(Setup):
         else:
             os.system(f'samtools fastq -f4 -0 {unmapped_read} --reference {reference} --threads 8 {nodup_bamfile} 2> /dev/null' )
             os.system(f'pigz {unmapped_read}')
-            shutil.move(f'{unmapped_read}.gz', unmapped_dir)
+            _safe_move(f'{unmapped_read}.gz', unmapped_dir)
             self.unmapped_read = f'{self.cwd}/{unmapped_dir}/{unmapped_read}.gz'
             self.unmapped_read_list = [self.unmapped_read]
             if not self.skip_assembly:
@@ -126,8 +138,8 @@ class Alignment(Setup):
         if not self.skip_assembly:
             assemble.run()
             try:
-                shutil.move(assemble.FASTA, f'{assemble.fastq_name}_unmapped.fasta')
-                shutil.move(f'{assemble.fastq_name}_unmapped.fasta', unmapped_dir)
+                _safe_move(assemble.FASTA, f'{assemble.fastq_name}_unmapped.fasta')
+                _safe_move(f'{assemble.fastq_name}_unmapped.fasta', unmapped_dir)
                 assemble.FASTA = f'{self.cwd}/{unmapped_dir}/{assemble.fastq_name}_unmapped.fasta'
                 assemble.stats(assemble.FASTA)
                 self.assemble = assemble
@@ -138,7 +150,7 @@ class Alignment(Setup):
                 self.unmapped_assemble = None
                 with open(f'{self.cwd}/{unmapped_dir}/failed_assembly', "w") as opened_file:
                     print("see unmapped FASTQ files for troubleshooting", file=opened_file)
-                shutil.move('spades_assembly/spades.log', unmapped_dir)
+                _safe_move('spades_assembly/spades.log', unmapped_dir)
                 if not self.debug:
                     shutil.rmtree('spades_assembly')
 
@@ -152,14 +164,14 @@ class Alignment(Setup):
         if not os.path.exists(alignment):
             os.makedirs(alignment)
         if os.path.exists(unmapped_dir):
-            shutil.move(unmapped_dir, alignment)
+            _safe_move(unmapped_dir, alignment)
         files_grab = []
         for files in ('*_nodup.bam', '*_zc.vcf', '*_nodup.bam.bai', '*_annotated.vcf', '*_filtered_hapall.vcf'):
             files_grab.extend(glob.glob(files))
         for each in files_grab:
-            shutil.move(each, alignment)
-        shutil.move(reference, alignment)
-        shutil.move(f'{reference}.fai', alignment)
+            _safe_move(each, alignment)
+        _safe_move(reference, alignment)
+        _safe_move(f'{reference}.fai', alignment)
         self.reference = f'{self.cwd}/{alignment}/{os.path.basename(reference)}'
         self.nodup_bamfile = f'{self.cwd}/{alignment}/{nodup_bamfile}'
         self.filtered_hapall = f'{self.cwd}/{alignment}/{filtered_hapall}'
@@ -174,7 +186,7 @@ class Alignment(Setup):
         for files in ('*_unmapped*.fastq.gz', '*_all.bam', '*.bai', '*_mapfix_hapall.vcf', '*_unfiltered_hapall.vcf', '*.sam', '*.amb', '*.ann', '*.bwt', '*.pac', '*.fasta.sa', '*_sorted.bam', '*.dict', 'chrom_ranges.txt', '*.fai', 'dup_metrics.csv'):
             files_grab.extend(glob.glob(files))
         for each in files_grab:
-            shutil.move(each, temp_dir)
+            _safe_move(each, temp_dir)
 
         if self.debug is False:
             shutil.rmtree(temp_dir)
@@ -284,7 +296,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     for files in ('*.aux', '*.log', '*tex', '*png', '*out', '*_all.bam', '*.bai', '*_mapfix_hapall.vcf', '*_unfiltered_hapall.vcf', '*.sam', '*.amb', '*.ann', '*.bwt', '*.pac', '*.fasta.sa', '*_sorted.bam', '*.dict', 'chrom_ranges.txt', 'dup_metrics.csv', '*.fai'):
         files_grab.extend(glob.glob(files))
     for each in files_grab:
-        shutil.move(each, temp_dir)
+        _safe_move(each, temp_dir)
 
     # if args.debug is False:
     #     shutil.rmtree(temp_dir)

@@ -12,7 +12,7 @@ import argparse
 import textwrap
 import humanize
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
 
 class FASTQ_Container:
     """Provide nested dot notation to object for each read with stats"""
@@ -233,7 +233,7 @@ def main():
     for files in ('*.aux', '*.log', '*tex', '*png', '*out'):
         files_grab.extend(glob.glob(files))
     for each in files_grab:
-        shutil.move(each, temp_dir)
+        safe_move(each, temp_dir)
 
     if args.debug is False:
         shutil.rmtree(temp_dir)

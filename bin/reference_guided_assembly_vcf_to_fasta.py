@@ -14,7 +14,7 @@ import allel
 from Bio import SeqIO
 from Bio.Seq import Seq
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
 
 class bcolors:
     PURPLE = '\033[95m'
@@ -192,7 +192,7 @@ if __name__ == "__main__":  # execute if directly access by the interpreter
     for files in ('*.aux', '*.log', '*tex', '*png', '*out'):
         files_grab.extend(glob.glob(files))
     for each in files_grab:
-        shutil.move(each, temp_dir)
+        safe_move(each, temp_dir)
 
     shutil.rmtree(temp_dir)
 

@@ -14,6 +14,16 @@ import multiprocessing
 from datetime import datetime
 from pathlib import Path
 
+def safe_move(src, dst):
+    """shutil.move that silently overwrites an existing destination file or directory."""
+    src_path = Path(src)
+    dst_path = Path(dst)
+    actual_dst = dst_path / src_path.name if dst_path.is_dir() else dst_path
+    if actual_dst.exists():
+        shutil.rmtree(actual_dst) if actual_dst.is_dir() else actual_dst.unlink()
+    shutil.move(str(src), str(dst))
+
+
 try:
     import svgwrite
     from cairosvg import svg2png
@@ -427,9 +437,12 @@ class Latex_Report:
         print(r'\end{document}', file=self.tex)
         self.tex.close()
         
-        # Run pdflatex twice for proper rendering
-        for _ in range(2):
-            os.system(f'pdflatex -interaction=nonstopmode {self.tex_file} > /dev/null 2>&1') #> /dev/null 2>&1
+        # tectonic auto-downloads missing packages and compiles in one pass
+        ret = os.system(f'tectonic {self.tex_file}')
+        if ret != 0:
+            # fallback to pdflatex if tectonic unavailable
+            for _ in range(2):
+                os.system(f'pdflatex -interaction=nonstopmode {self.tex_file} > /dev/null 2>&1')
 
 class Excel_Stats:
     """Generate Excel statistics reports"""

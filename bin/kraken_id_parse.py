@@ -19,7 +19,7 @@ from random import randint
 from time import sleep
 from Bio import SeqIO
 
-from file_setup import bcolors, Latex_Report, Excel_Stats
+from file_setup import bcolors, Latex_Report, Excel_Stats, safe_move
 
 from fastq_stats_seqkit import FASTQ_Stats
 from alignment_vcf import Alignment
@@ -60,6 +60,31 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     parser.add_argument('-v', '--version', action='version', version=f'{os.path.basename(__file__)}: version {__version__}')
     args = parser.parse_args()
     
+    # Pre-flight: verify all required external tools are on PATH
+    REQUIRED_TOOLS = [
+        'kraken2', 'bracken', 'kreport2krona.py', 'ktImportText',
+        'spades.py', 'blastn', 'bwa', 'samtools', 'picard',
+        'freebayes', 'freebayes-parallel', 'vcffilter', 'pigz', 'seqkit',
+        'tectonic',
+    ]
+    print(f'\n{"="*55}')
+    print(f'  PRE-FLIGHT TOOL CHECK')
+    print(f'{"="*55}')
+    missing_tools = []
+    for tool in REQUIRED_TOOLS:
+        path = shutil.which(tool)
+        if path:
+            print(f'  OK      {tool}: {path}')
+        else:
+            print(f'  MISSING {tool}  <-- not found on PATH')
+            missing_tools.append(tool)
+    if missing_tools:
+        print(f'\n  WARNING: {len(missing_tools)} tool(s) missing: {", ".join(missing_tools)}')
+        print(f'  Pipeline will fail when these are reached.\n')
+    else:
+        print(f'  All tools found.\n')
+    print(f'{"="*55}\n')
+
     print(f'\n{os.path.basename(__file__)} SET ARGUMENTS:')
     print(args)
     print("\n")
@@ -128,7 +153,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         print("Removing:")
         for each in files_grab:
             print(f'\t{each}')
-            shutil.move(each, temp_dir)
+            safe_move(each, temp_dir)
 
         shutil.rmtree(temp_dir)
         try: 

@@ -70,21 +70,42 @@ _SCOPE_SHARED = "shared"
 _SCOPE_PERSONAL = "personal"
 
 
+def _safe_mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime if p.is_dir() else 0
+    except PermissionError:
+        return 0
+
+
 def _list_projects_from_root(root: Path, scope: str) -> List[Dict]:
     if not root.is_dir():
         return []
     projects = []
-    for p in sorted(root.iterdir(), key=lambda d: d.stat().st_mtime if d.is_dir() else 0, reverse=True):
-        if not p.is_dir() or p.name.startswith("."):
+    try:
+        entries = sorted(root.iterdir(), key=_safe_mtime, reverse=True)
+    except PermissionError:
+        return []
+    for p in entries:
+        try:
+            if not p.is_dir() or p.name.startswith("."):
+                continue
+        except PermissionError:
             continue
         download_dir = p / "download"
-        fastq_count = len(list(download_dir.rglob("*.fastq.gz"))) if download_dir.is_dir() else 0
+        try:
+            fastq_count = len(list(download_dir.rglob("*.fastq.gz"))) if download_dir.is_dir() else 0
+        except PermissionError:
+            fastq_count = -1  # signals "no access" to frontend
         kraken_runs = []
         kraken_dir = p / "kraken"
-        if kraken_dir.is_dir():
-            kraken_runs = [d.name for d in sorted(kraken_dir.iterdir()) if d.is_dir()]
+        try:
+            if kraken_dir.is_dir():
+                kraken_runs = [d.name for d in sorted(kraken_dir.iterdir()) if d.is_dir()]
+        except PermissionError:
+            pass
         projects.append({
             "name": p.name,
+            "path": str(p),
             "scope": scope,
             "fastq_count": fastq_count,
             "kraken_runs": kraken_runs,
@@ -104,33 +125,69 @@ def _get_project_dir(name: str) -> Optional[Path]:
     return None
 
 
+# Matches _R1/_R2 (with optional _001 etc.) or _1/_2 immediately before .fastq.gz
+_READ_TAG_RE = re.compile(r'(?:_R([12])(?:_\d+)?|_([12]))\.fastq\.gz$', re.IGNORECASE)
+
+
+def _strip_read_tag(filename: str):
+    """Return (base, read_num) where read_num is '1', '2', or None."""
+    m = _READ_TAG_RE.search(filename)
+    if m:
+        tag = m.group(1) or m.group(2)
+        return filename[:m.start()], tag
+    return filename[:-len(".fastq.gz")], None
+
+
 def _list_fastq_pairs(download_dir: Path) -> List[Dict]:
-    """Return paired FASTQ files as {sample, r1, r2} dicts."""
-    r1_files = sorted(download_dir.glob("*_R1*.fastq.gz"))
+    """Return samples as {sample, paired, r1, r1_name, r2, r2_name} dicts.
+
+    Handles both Illumina (_R1/_R2) and SRA (_1/_2) naming conventions.
+    Files with no read suffix are treated as single-end.
+    """
+    try:
+        all_fq = sorted(download_dir.glob("*.fastq.gz"))
+    except PermissionError:
+        return []
+
+    # Preserve insertion order so samples appear sorted
+    groups: Dict[str, Dict] = {}
+    for fq in all_fq:
+        base, tag = _strip_read_tag(fq.name)
+        if base not in groups:
+            groups[base] = {"r1": None, "r2": None, "extras": []}
+        g = groups[base]
+        if tag == "1":
+            g["r1"] = fq
+        elif tag == "2":
+            g["r2"] = fq
+        else:
+            g["extras"].append(fq)
+
     pairs = []
-    for r1 in r1_files:
-        sample = re.sub(r"_R1.*", "", r1.name)
-        # Find matching R2 in same directory
-        r2_candidates = list(download_dir.glob(f"*{sample}*_R2*.fastq.gz"))
-        r2 = r2_candidates[0] if r2_candidates else None
-        pairs.append({
-            "sample": sample,
-            "r1": str(r1),
-            "r1_name": r1.name,
-            "r2": str(r2) if r2 else None,
-            "r2_name": r2.name if r2 else None,
-        })
-    # Also catch singletons (no _R1 pattern) not already included
-    all_fq = set(download_dir.glob("*.fastq.gz"))
-    covered = {Path(p["r1"]) for p in pairs} | {Path(p["r2"]) for p in pairs if p["r2"]}
-    for fq in sorted(all_fq - covered):
-        pairs.append({
-            "sample": re.sub(r"\.fastq\.gz$", "", fq.name),
-            "r1": str(fq),
-            "r1_name": fq.name,
-            "r2": None,
-            "r2_name": None,
-        })
+    for base, g in groups.items():
+        r1, r2 = g["r1"], g["r2"]
+        if r1 or r2:
+            eff_r1 = r1 or r2
+            eff_r2 = r2 if r1 else None
+            pairs.append({
+                "sample": base,
+                "paired": bool(r1 and r2),
+                "r1": str(eff_r1), "r1_name": eff_r1.name,
+                "r1_size": eff_r1.stat().st_size,
+                "r2": str(eff_r2) if eff_r2 else None,
+                "r2_name": eff_r2.name if eff_r2 else None,
+                "r2_size": eff_r2.stat().st_size if eff_r2 else None,
+            })
+        for fq in g["extras"]:
+            pairs.append({
+                "sample": fq.name[:-len(".fastq.gz")],
+                "paired": False,
+                "r1": str(fq), "r1_name": fq.name,
+                "r1_size": fq.stat().st_size,
+                "r2": None, "r2_name": None,
+                "r2_size": None,
+            })
+
     return pairs
 
 
@@ -206,9 +263,8 @@ def api_run(payload: RunPayload):
     if project_dir is None:
         raise HTTPException(404, f"Project not found: {payload.project}")
 
-    # Derive sample name (strip everything from _R1 onward, or .fastq.gz)
-    sample_name = re.sub(r"[._]R1.*", "", r1.name)
-    sample_name = re.sub(r"\.fastq\.gz$", "", sample_name)
+    # Derive sample name — strip _R1/_R2 or _1/_2 read tags
+    sample_name, _ = _strip_read_tag(r1.name)
 
     # Output directory: <project>/kraken/<sample_name>/
     run_dir = project_dir / "kraken" / sample_name
@@ -260,6 +316,8 @@ async def api_job_log(job_id: str, request: Request):
 
     log_path = Path(job["log_path"])
 
+    _ansi_re = re.compile(r'\x1b\[[0-9;]*[mGKHFABCDJsur]')
+
     async def event_stream():
         position = 0
         while True:
@@ -273,7 +331,9 @@ async def api_job_log(job_id: str, request: Request):
                     if chunk:
                         lines = chunk.splitlines(keepends=True)
                         for line in lines:
-                            yield f"data: {line.rstrip()}\n\n"
+                            clean = _ansi_re.sub("", line.rstrip())
+                            if clean:
+                                yield f"data: {clean}\n\n"
                         position += len(chunk.encode("utf-8"))
             if current_job and current_job["status"] in ("succeeded", "failed"):
                 yield "data: [DONE]\n\n"

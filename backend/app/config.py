@@ -21,9 +21,8 @@ _DEFAULT_SHARED_PROJECTS_ROOT = (
 DEFAULTS: Dict[str, Any] = {
     "projects_root": str(Path.home() / "projects"),
     "shared_projects_root": _DEFAULT_SHARED_PROJECTS_ROOT,
-    # Paths to Kraken2 and BLAST databases — empty until the user configures them.
-    "kraken_db": "",
-    "blast_db": "nt",
+    "kraken_db": "/srv/kapurlab/databases/kraken2/k2_standard_08gb",
+    "blast_db": "/srv/kapurlab/databases/blast/ref_prok_rep_genomes",
 }
 
 

@@ -3,12 +3,13 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -183,17 +184,19 @@ class JobManager:
     def start_job(
         self,
         name: str,
-        command: str,
+        command: Sequence[str],
         cwd: Optional[Path] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> str:
         job_id = uuid.uuid4().hex
         log_path = self.jobs_dir / f"{job_id}.log"
         started_at = datetime.now(timezone.utc)
+        command_display = shlex.join([str(part) for part in command])
         job = {
             "id": job_id,
             "name": name,
-            "command": command,
+            "command": command_display,
+            "argv": [str(part) for part in command],
             "cwd": str(cwd) if cwd else None,
             "status": "running",
             "exit_code": None,
@@ -236,7 +239,7 @@ class JobManager:
     def _run(
         self,
         job_id: str,
-        command: str,
+        command: Sequence[str],
         cwd: Optional[Path],
         env: Optional[Dict[str, str]],
         log_path: Path,
@@ -246,30 +249,32 @@ class JobManager:
         exit_path = self._exit_path(job_id)
         exit_path.unlink(missing_ok=True)
 
-        # The pipeline shell records its own exit code to a file *before*
-        # returning. That file is the source of truth for success/failure and
-        # survives this uvicorn process being killed, so a job that finishes
-        # after a restart can still be finalized correctly by _watch_pid.
-        wrapped = (
-            f"{command}\n"
-            f"__ec=$?\n"
-            f'echo "$__ec" > {shlex.quote(str(exit_path))}\n'
-            f"exit $__ec\n"
+        command_argv = [str(part) for part in command]
+        command_display = shlex.join(command_argv)
+        wrapper_code = (
+            "import subprocess, sys\n"
+            "exit_path = sys.argv[1]\n"
+            "argv = sys.argv[2:]\n"
+            "exit_code = subprocess.run(argv).returncode\n"
+            "with open(exit_path, 'w', encoding='utf-8') as fh:\n"
+            "    fh.write(str(exit_code))\n"
+            "sys.exit(exit_code)\n"
         )
+        wrapped_argv = [sys.executable, "-c", wrapper_code, str(exit_path), *command_argv]
 
         with open(log_path, "w", encoding="utf-8") as log:
             started_at = datetime.now(timezone.utc)
             log.write(f"# started_at_utc: {started_at.isoformat()}\n")
-            log.write(f"$ {command}\n\n")
+            log.write(f"$ {command_display}\n\n")
             log.flush()
             try:
                 process = subprocess.Popen(
-                    wrapped,
+                    wrapped_argv,
                     cwd=str(cwd) if cwd else None,
                     env={**os.environ, **(env or {})},
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    shell=True,
+                    shell=False,
                     text=True,
                     start_new_session=True,  # own process group/session: survives
                     stdin=subprocess.DEVNULL,  # tmux SIGHUP on OOD session teardown

@@ -17,6 +17,7 @@ dependencies:
   - scipy
   - scikit-learn
   - pytest
+  - jinja2
 
   # Bioinformatics core tools
   - biopython
@@ -24,6 +25,7 @@ dependencies:
   - krakentools
   - samtools
   - krona
+  - tectonic
 
   # Analysis and data packages
   - scikit-allel

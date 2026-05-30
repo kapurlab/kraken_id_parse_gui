@@ -15,17 +15,19 @@ All URLs served from / (uvicorn is behind OOD rnode proxy — relative paths onl
 
 import asyncio
 import glob
+import json
 import logging
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiofiles
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -283,23 +285,25 @@ def api_run(payload: RunPayload):
 
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build command
+    # Build argv without a shell so project/sample/taxon/db values cannot be
+    # interpreted as shell syntax.
     script = _BIN_DIR / "kraken_id_parse.py"
     # -u: unbuffered stdout/stderr so the parent script's progress prints stream
     # to the log in real time and in order (otherwise Python block-buffers when
     # stdout is a pipe and the log appears to freeze between subprocess outputs).
-    cmd_parts = [f'python -u "{script}"', f'-r1 "{payload.r1}"']
+    command = [sys.executable, "-u", str(script), "-r1", str(r1)]
     if payload.r2:
         r2 = Path(payload.r2)
         if r2.exists():
-            cmd_parts.append(f'-r2 "{payload.r2}"')
-    cmd_parts.append(f'-t "{payload.taxon}"')
+            command.extend(["-r2", str(r2)])
+        else:
+            raise HTTPException(400, f"R2 file not found: {payload.r2}")
+    command.extend(["-t", payload.taxon])
     if kraken_db:
-        cmd_parts.append(f'-k "{kraken_db}"')
+        command.extend(["-k", kraken_db])
     if blast_db:
-        cmd_parts.append(f'-b "{blast_db}"')
+        command.extend(["-b", blast_db])
 
-    command = " ".join(cmd_parts)
     env = {
         "PYTHONPATH": str(_BIN_DIR),
         "PATH": os.environ.get("PATH", ""),
@@ -382,8 +386,7 @@ _DOWNLOAD_MEDIA = {
     ".fa": "text/plain",
     ".gz": "application/gzip",
 }
-# Files surfaced first in the Results pane (the ones users actually want).
-_PRIORITY_SUFFIXES = ("_report.pdf", "_stats.xlsx", "_krona.html")
+_TIMESTAMP_RE = re.compile(r"_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
 
 
 def _can_open_inline(name: str) -> bool:
@@ -395,8 +398,130 @@ def _media_type_for(name: str) -> str:
     return _INLINE_MEDIA.get(ext) or _DOWNLOAD_MEDIA.get(ext) or "application/octet-stream"
 
 
+def _result_category(rel: str) -> Optional[str]:
+    """Return the primary-results category for a relative run output path.
+
+    The run directory intentionally keeps intermediate files for audit/debugging,
+    but the GUI should show the small set users normally open or download.
+    """
+    path = Path(rel)
+    name = path.name
+    parts = path.parts
+
+    if any(part.startswith(".") for part in parts):
+        return None
+    if parts and parts[0] == "previews":
+        return None
+    if name.endswith("-banner.png") or name == "bracken_pie.png":
+        return None
+    if name.endswith(".fastq.gz"):
+        return None
+    if name in {"run_manifest.json", "combined_references.fasta", "CAUTION_SITES.xlsx"}:
+        return None
+
+    if rel == "report.pdf":
+        return "report_pdf"
+    if rel == "report.html":
+        return "report_html"
+    if name.endswith("_stats.xlsx"):
+        return "stats"
+    if name.endswith("_krona.html"):
+        return "krona"
+    if name.endswith("-bracken.xlsx"):
+        return "bracken"
+    if name.endswith("_blast_summary.txt") or name == "consensus_blast_summary.txt":
+        return "blast_summary"
+    if name.endswith("_denovo.fasta"):
+        return "denovo_fasta"
+    if name.endswith("_reference_guided.fasta"):
+        return "reference_fasta"
+    if name.endswith("-coverage_graph.pdf"):
+        return "coverage_pdf"
+    if name.endswith("-coverage_stats.json"):
+        return None
+    if parts and parts[0] == "kraken":
+        return None
+    return None
+
+
+_CATEGORY_ORDER = {
+    "report_pdf": 0,
+    "report_html": 1,
+    "stats": 2,
+    "krona": 3,
+    "blast_summary": 4,
+    "denovo_fasta": 5,
+    "reference_fasta": 6,
+    "coverage_pdf": 7,
+    "bracken": 8,
+    "log": 99,
+}
+
+
+def _result_label(rel: str, category: Optional[str]) -> str:
+    if category == "report_pdf":
+        return "Report PDF"
+    if category == "report_html":
+        return "Report HTML"
+    if category == "stats":
+        return "Run statistics workbook"
+    if category == "krona":
+        return "Krona taxonomy report"
+    if category == "blast_summary":
+        return "BLAST summary" if Path(rel).name != "consensus_blast_summary.txt" else "Consensus BLAST summary"
+    if category == "denovo_fasta":
+        return "De novo assembly FASTA"
+    if category == "reference_fasta":
+        return "Reference-guided FASTA"
+    if category == "coverage_pdf":
+        return "Coverage graph PDF"
+    if category == "bracken":
+        return "Bracken results workbook"
+    if category == "log":
+        return "Pipeline log"
+    return rel
+
+
+def _dedupe_primary_results(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep only latest timestamped/rerun artifacts in each primary category."""
+    latest_by_category: Dict[str, Dict[str, Any]] = {}
+    passthrough: List[Dict[str, Any]] = []
+
+    singleton_categories = {"stats", "krona", "coverage_pdf"}
+    for file in files:
+        category = file.get("category")
+        if category in singleton_categories:
+            current = latest_by_category.get(category)
+            if current is None or file["mtime"] > current["mtime"]:
+                latest_by_category[category] = file
+        else:
+            passthrough.append(file)
+
+    return passthrough + list(latest_by_category.values())
+
+
+def _render_api_report_html(run_dir: Path, report_html: Path) -> Optional[str]:
+    """Render report.html with API-relative asset URLs for GUI viewing."""
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        if str(_BIN_DIR) not in sys.path:
+            sys.path.insert(0, str(_BIN_DIR))
+        from reporting.html_renderer import render_html_text
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return render_html_text(manifest, asset_mode="api")
+    except Exception as exc:
+        logger.warning("Could not render API report HTML from %s: %s", manifest_path, exc)
+        try:
+            return report_html.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+
 @app.get("/api/jobs/{job_id}/results")
-def api_job_results(job_id: str):
+def api_job_results(job_id: str, all: int = Query(0)):
     """List output files in the job's run directory, plus the pipeline log.
 
     Each entry carries `openable` (can the browser render it inline) so the UI
@@ -413,8 +538,18 @@ def api_job_results(job_id: str):
         for p in sorted(run_dir.rglob("*")):
             if p.is_file() and not p.name.endswith(".log"):
                 rel = str(p.relative_to(run_dir))
+                category = _result_category(rel)
+                if not all and category is None:
+                    continue
                 files.append(
-                    {"name": rel, "size": p.stat().st_size, "openable": _can_open_inline(rel)}
+                    {
+                        "name": rel,
+                        "label": _result_label(rel, category),
+                        "size": p.stat().st_size,
+                        "mtime": p.stat().st_mtime,
+                        "openable": _can_open_inline(rel),
+                        "category": category,
+                    }
                 )
 
     # Surface the pipeline log itself (lives outside run_dir, in the jobs dir).
@@ -423,21 +558,32 @@ def api_job_results(job_id: str):
         files.append(
             {
                 "name": "pipeline_log.txt",
+                "label": "Pipeline log",
                 "size": log_path.stat().st_size,
+                "mtime": log_path.stat().st_mtime,
                 "openable": True,
+                "category": "log",
                 "is_log": True,
             }
         )
 
-    # Sort: priority files first (PDF, Excel, Krona), then the rest, log last.
+    if not all:
+        files = _dedupe_primary_results(files)
+
+    # Sort: primary outputs in workflow order, log last.
     def sort_key(f):
         if f.get("is_log"):
-            return (2, f["name"])
-        if any(f["name"].endswith(s) for s in _PRIORITY_SUFFIXES):
-            return (0, f["name"])
-        return (1, f["name"])
+            return (_CATEGORY_ORDER["log"], f["name"])
+        category = f.get("category")
+        if category in _CATEGORY_ORDER:
+            return (_CATEGORY_ORDER[category], _TIMESTAMP_RE.sub("", f["name"]))
+        return (50, f["name"])
 
     files.sort(key=sort_key)
+    for file in files:
+        file.pop("mtime", None)
+        if all and file.get("category") is None:
+            file["label"] = file["name"]
     return JSONResponse(files)
 
 
@@ -472,6 +618,14 @@ def api_job_file(job_id: str, path: str = Query(...), inline: int = 0):
 
     media_type = _media_type_for(target.name)
     want_inline = bool(inline) and _can_open_inline(target.name)
+    if path == "report.html" and want_inline and target.name == "report.html":
+        html = _render_api_report_html(run_dir, target) if path != "pipeline_log.txt" else None
+        if html is not None:
+            return HTMLResponse(
+                html,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
+
     disposition = "inline" if want_inline else "attachment"
     headers = {"Content-Disposition": f'{disposition}; filename="{display_name}"'}
     return FileResponse(target, media_type=media_type, headers=headers)

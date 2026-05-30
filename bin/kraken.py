@@ -11,12 +11,11 @@ import textwrap
 import pandas as pd
 import multiprocessing
 multiprocessing.set_start_method('spawn', True)
-import matplotlib.pyplot as plt
-plt.style.use('seaborn-v0_8-colorblind')
-from matplotlib import pyplot as plt
-cmap = plt.get_cmap('coolwarm')
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, apply_mpl_style
+
+plt = apply_mpl_style()
+cmap = plt.get_cmap('coolwarm')
 
 class Kraken_Identification(Setup):
     ''' 

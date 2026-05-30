@@ -36,6 +36,7 @@ from blast_to_coverage import BlastCoverageBridge
 from orbivirus_specific import Orbivirus_Specific
 from isav_specific import ISAV_Specific
 from apicomplexa_specific import Apicomplexa
+from reporting import build_run_manifest, render_html_report, render_pdf_report, write_manifest
 
 
 if __name__ == "__main__": # execute if directly access by the interpreter
@@ -148,7 +149,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
         files_grab = []
-        for files in ('*.aux', '*.log', '*tex', '*png', '*out', 'batch.sh', '*_blast_all.txt', '*_blast_out.txt', '*_blast_summary.txt', 'coverage_list.txt', 'coverage.txt', '*-coverage_graph.pdf', 'combined_references.fasta', 'CAUTION_SITES.xlsx'):
+        for files in ('*.aux', '*.log', '*tex', '*out', 'batch.sh', '*_blast_all.txt', '*_blast_out.txt', 'coverage_list.txt', 'coverage.txt'):
             files_grab.extend(glob.glob(files))
         print("Removing:")
         for each in files_grab:
@@ -164,6 +165,53 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             shutil.rmtree('alignment_top')
         except: 
             pass
+
+    def write_structured_reports(status: str, warnings=None):
+        warnings = warnings or []
+        try:
+            output_dir = Path.cwd()
+            manifest = build_run_manifest(
+                sample_id=sample_name,
+                status=status,
+                warnings=warnings,
+                inputs={"r1": args.FASTQ_R1, "r2": args.FASTQ_R2},
+                parameters={
+                    "taxon": args.taxon,
+                    "kraken_db": args.kraken_db,
+                    "blast_db": args.blast_db,
+                },
+                output_dir=output_dir,
+                started_at=start_time,
+            )
+            manifest_path = write_manifest(manifest, output_dir)
+            html_path = render_html_report(manifest, output_dir)
+            pdf_path, pdf_warning = render_pdf_report(html_path, output_dir)
+            if pdf_warning:
+                manifest.setdefault("warnings", []).append(pdf_warning)
+                manifest_path = write_manifest(manifest, output_dir)
+                html_path = render_html_report(manifest, output_dir)
+                print(f"WARNING: {pdf_warning}")
+            else:
+                manifest = build_run_manifest(
+                    sample_id=sample_name,
+                    status=status,
+                    warnings=warnings,
+                    inputs={"r1": args.FASTQ_R1, "r2": args.FASTQ_R2},
+                    parameters={
+                        "taxon": args.taxon,
+                        "kraken_db": args.kraken_db,
+                        "blast_db": args.blast_db,
+                    },
+                    output_dir=output_dir,
+                    started_at=start_time,
+                )
+                manifest_path = write_manifest(manifest, output_dir)
+                html_path = render_html_report(manifest, output_dir)
+                print(f"PDF report generated: {pdf_path}")
+            print(f"Structured report manifest generated: {manifest_path}")
+            print(f"HTML report generated: {html_path}")
+        except Exception as exc:
+            print(f"WARNING: structured HTML report generation failed: {exc}")
         
     """Execute the complete analysis pipeline"""
     print(f"\n{bcolors.GREEN}Starting bioinformatics analysis pipeline...{bcolors.ENDC}\n")
@@ -190,6 +238,10 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         excel_stats.excel_dict['Extracted Reads'] = "No Reads Found"
         excel_stats.post_excel()
         cleanup_artifacts()
+        write_structured_reports(
+            "completed_with_warnings",
+            [f"Target taxon not found by Kraken: {args.taxon}"],
+        )
         sys.exit(0)
         
     
@@ -209,6 +261,10 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         excel_stats.excel_dict['Contig count'] = "Assembly did not complete"
         excel_stats.post_excel()
         cleanup_artifacts()
+        write_structured_reports(
+            "completed_with_warnings",
+            [f"Assembly did not complete for target taxon: {args.taxon}"],
+        )
         sys.exit(0)
         
     assembler.stats(assembler.FASTA)
@@ -551,6 +607,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     print(current_directory)
     
     cleanup_artifacts()
+    write_structured_reports("completed")
     
 
 

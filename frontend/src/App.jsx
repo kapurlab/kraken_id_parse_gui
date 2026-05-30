@@ -14,9 +14,10 @@ const TAXON_PRESETS = [
 ];
 
 function fileIcon(name) {
+  if (name.endsWith(".json")) return "📁";
   if (name.endsWith(".xlsx")) return "📊";
   if (name.endsWith(".pdf")) return "📄";
-  if (name.endsWith(".png") || name.endsWith(".pdf")) return "🖼";
+  if (name.endsWith(".png")) return "🖼";
   if (name.endsWith(".fasta") || name.endsWith(".fa")) return "🧬";
   if (name.endsWith(".vcf")) return "🔬";
   if (name.endsWith(".txt")) return "📝";
@@ -470,18 +471,19 @@ export default function App() {
               ) : (
                 results.map((f) => {
                   const base = `./api/jobs/${jobId}/file?path=${encodeURIComponent(f.name)}`;
+                  const displayName = f.label || f.name;
                   return (
                     <div key={f.name} className="result-file">
                       <span className="result-icon">{fileIcon(f.name)}</span>
                       {f.openable ? (
                         <a className="result-name result-link" href={`${base}&inline=1`}
                            target="_blank" rel="noopener noreferrer" title={`Open ${f.name}`}>
-                          {f.name}
+                          {displayName}
                         </a>
                       ) : (
                         <a className="result-name result-link" href={`${base}&inline=0`}
                            title={`Download ${f.name}`}>
-                          {f.name}
+                          {displayName}
                         </a>
                       )}
                       <span className="result-size">{fmtSize(f.size)}</span>

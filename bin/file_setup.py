@@ -34,6 +34,31 @@ try:
 except ImportError:
     HAS_SVG_SUPPORT = False
 
+
+def apply_mpl_style(style_candidates: Optional[List[str]] = None):
+    """Apply a Matplotlib style with fallback across Matplotlib versions."""
+    import matplotlib
+
+    if not os.environ.get("MPLBACKEND"):
+        matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    candidates = style_candidates or [
+        "seaborn-v0_8-colorblind",
+        "seaborn-colorblind",
+        "seaborn-v0_8",
+        "seaborn",
+        "ggplot",
+    ]
+    for style in candidates:
+        try:
+            plt.style.use(style)
+            break
+        except OSError:
+            continue
+    return plt
+
+
 class bcolors:
     """ANSI color codes for terminal output formatting"""
     PURPLE = '\033[95m'

@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import "./App.css";
 
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+const APP_VERSION = "0.2.0";
+
 const TAXON_PRESETS = [
   "Mycobacterium tuberculosis complex",
   "Mycobacterium bovis",
@@ -48,9 +49,15 @@ export default function App() {
   const [jobStatus, setJobStatus] = useState("idle"); // idle | running | succeeded | failed
   const [logLines, setLogLines] = useState([]);
   const [results, setResults] = useState([]);
-  const [showSettings, setShowSettings] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState({});
   const [currentStep, setCurrentStep] = useState("");
+
+  // Section visibility (collapsible flow, adapted from latex gui)
+  const [showSettings, setShowSettings] = useState(false);
+  const [showProjects, setShowProjects] = useState(true);
+  const [showRun, setShowRun] = useState(true);
+  const [showLogs, setShowLogs] = useState(true);
+
   const logRef = useRef(null);
   const eventSourceRef = useRef(null);
 
@@ -130,6 +137,7 @@ export default function App() {
     setLogLines([]);
     setResults([]);
     setCurrentStep("");
+    setShowLogs(true);
 
     fetch("./api/run", {
       method: "POST",
@@ -213,7 +221,6 @@ export default function App() {
       .then(() => {
         setKrakenDb(settingsDraft.kraken_db || "");
         setBlastDb(settingsDraft.blast_db || "nt");
-        setShowSettings(false);
         loadProjects();
       })
       .catch(() => {});
@@ -226,149 +233,267 @@ export default function App() {
     return "log-line";
   };
 
+  const statusText = {
+    idle: "idle",
+    running: "running",
+    succeeded: "succeeded",
+    failed: "failed",
+  }[jobStatus];
+
   return (
-    <>
-      <div className="app-root">
-        {/* Header */}
-        <header className="header">
-          <span style={{ fontSize: 20 }}>🦠</span>
-          <h1>Kraken ID Parse</h1>
-          <span className="header-badge">contamination screen</span>
-          <div className="header-spacer" />
-          <button className="header-settings" onClick={() => {
-            fetch("./api/config").then(r => r.json()).then(cfg => setSettingsDraft(cfg));
-            setShowSettings(true);
+    <div className="app">
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <header className="app-header">
+        <div className="app-brand">
+          <img className="app-logo" src="./kraken_icon.png" alt="Kraken icon" />
+          <div>
+            <h1>
+              Kraken ID Parse <span className="version-tag">v{APP_VERSION}</span>
+            </h1>
+            <p>Classify and isolate reads for species-level identification and contamination screening</p>
+          </div>
+        </div>
+        <div className="status-pill">
+          <span className="dot" data-state={jobStatus} />
+          <span>{statusText}</span>
+        </div>
+      </header>
+
+      <main className="layout">
+        {/* ── Alert banner ─────────────────────────────────────── */}
+        {!krakenDb && (
+          <div className="alert-banner">
+            <strong>Setup needed:</strong> No Kraken2 database configured. Open{" "}
+            <button
+              className="ghost action"
+              style={{ padding: "2px 8px", fontSize: 12 }}
+              onClick={() => setShowSettings(true)}
+            >
+              Settings
+            </button>{" "}
+            to set the database path before running.
+          </div>
+        )}
+
+        {/* ── Status strip ─────────────────────────────────────── */}
+        <section className="status-strip">
+          <div className="status-item">
+            <span className="status-label">Project</span>
+            <span className="status-value">{selectedSample?.project || "—"}</span>
+          </div>
+          <div className="status-item">
+            <span className="status-label">Sample</span>
+            <span className="status-value">{selectedSample?.sample || "—"}</span>
+          </div>
+          <div className="status-item">
+            <span className="status-label">Reads</span>
+            <span className="status-value">
+              {selectedSample ? (selectedSample.paired ? "Paired-end" : "Single-end") : "—"}
+            </span>
+          </div>
+          <div className="status-item">
+            <span className="status-label">Target Taxon</span>
+            <span className="status-value">{taxon.trim() || "—"}</span>
+          </div>
+          <div className="status-item">
+            <span className="status-label">Job</span>
+            <span className="status-value cap">
+              {jobStatus === "running" ? <><span className="pulse-dot" />running</> : statusText}
+            </span>
+          </div>
+        </section>
+
+        {/* ════════════════════════════════════════════════════════ */}
+        {/* SECTION: Settings (collapsed by default)                */}
+        {/* ════════════════════════════════════════════════════════ */}
+        <div className="row-header">
+          <h2>Settings</h2>
+          <button className="ghost" onClick={() => {
+            if (!showSettings) {
+              fetch("./api/config").then((r) => r.json()).then(setSettingsDraft).catch(() => {});
+            }
+            setShowSettings(!showSettings);
           }}>
-            ⚙ Settings
+            {showSettings ? "Hide" : "Show"}
           </button>
-        </header>
+        </div>
+        {showSettings && (
+          <div className="row-grid row-grid-single">
+            <section className="panel">
+              <div className="form-section">
+                <label className="form-label">Kraken2 database path</label>
+                <input
+                  placeholder="/srv/kapurlab/databases/kraken2/k2_standard"
+                  value={settingsDraft.kraken_db || ""}
+                  onChange={(e) => setSettingsDraft((d) => ({ ...d, kraken_db: e.target.value }))}
+                />
+                <div className="form-hint">Directory containing hash.k2d, opts.k2d, taxo.k2d</div>
+              </div>
+              <div className="form-section">
+                <label className="form-label">BLAST database path or name</label>
+                <input
+                  placeholder="nt"
+                  value={settingsDraft.blast_db || ""}
+                  onChange={(e) => setSettingsDraft((d) => ({ ...d, blast_db: e.target.value }))}
+                />
+                <div className="form-hint">Use "nt" for NCBI remote, or an absolute path to a local BLAST db</div>
+              </div>
+              <div className="form-section">
+                <label className="form-label">Personal projects root</label>
+                <input
+                  value={settingsDraft.projects_root || ""}
+                  onChange={(e) => setSettingsDraft((d) => ({ ...d, projects_root: e.target.value }))}
+                />
+                <div className="form-hint">Shared projects at /srv/kapurlab/projects/ are always visible</div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <button onClick={saveSettings}>Save</button>
+              </div>
+            </section>
+          </div>
+        )}
 
-        {/* Main layout */}
-        <div className="layout">
-          {/* LEFT — project browser */}
-          <aside className="panel-left">
-            <div className="panel-title" style={{ display: "flex", alignItems: "center" }}>
-              Projects
-              <button className="refresh-btn" onClick={loadProjects}>↻ refresh</button>
-            </div>
-            <div className="project-list">
-              {projectsLoading && <div className="loading-text">Loading projects…</div>}
-              {!projectsLoading && projects.length === 0 && (
-                <div className="no-projects">
-                  No projects found.<br />
-                  <span style={{ fontSize: 11 }}>Check Settings for the projects path.</span>
+        {/* ════════════════════════════════════════════════════════ */}
+        {/* SECTION: Projects & Samples                             */}
+        {/* ════════════════════════════════════════════════════════ */}
+        <div className="row-header">
+          <h2>Projects &amp; Samples</h2>
+          <button className="ghost" onClick={() => setShowProjects(!showProjects)}>
+            {showProjects ? "Hide" : "Show"}
+          </button>
+        </div>
+        {showProjects && (
+          <div className="row-grid row-grid-split">
+            {/* LEFT — project / sample browser */}
+            <section className="panel">
+              <div className="panel-header">
+                <h2>Projects</h2>
+                <div className="panel-actions">
+                  <button className="ghost action" onClick={loadProjects}>↻ Refresh</button>
                 </div>
-              )}
-              {projects.map((proj) => (
-                <div key={proj.name} className="project-item">
+              </div>
+              <div className="list project-list">
+                {projectsLoading && <div className="loading-text">Loading projects…</div>}
+                {!projectsLoading && projects.length === 0 && (
+                  <div className="note">No projects found. Check Settings for the projects path.</div>
+                )}
+                {projects.map((proj) => (
                   <div
-                    className={`project-header ${selectedSample?.project === proj.name ? "selected" : ""}`}
-                    onClick={() => toggleProject(proj.name)}
+                    key={proj.name}
+                    className={`list-item ${selectedSample?.project === proj.name ? "active" : ""}`}
                   >
-                    <span className="expand-icon">{expanded[proj.name] ? "▾" : "▸"}</span>
-                    <div className="project-name-block">
-                      <div className="project-name" title={proj.name}>{proj.name}</div>
-                      {proj.path && (
-                        <div className="project-path" title={proj.path}>{proj.path}</div>
-                      )}
+                    <div className="item-top" onClick={() => toggleProject(proj.name)}>
+                      <span className="expand-icon">{expanded[proj.name] ? "▾" : "▸"}</span>
+                      <div className="list-title" title={proj.name}>{proj.name}</div>
+                      <span className={`scope-badge scope-${proj.scope}`}>{proj.scope}</span>
                     </div>
-                    <span className={`scope-badge scope-${proj.scope}`}>{proj.scope}</span>
-                  </div>
-                  <div className="project-meta" style={{ paddingLeft: 32, paddingBottom: expanded[proj.name] ? 0 : 6, fontSize: 11, color: "#94a3b8" }}>
-                    {proj.fastq_count} FASTQ
-                    {proj.kraken_runs?.length > 0 && ` · ${proj.kraken_runs.length} Kraken run${proj.kraken_runs.length > 1 ? "s" : ""}`}
-                  </div>
-                  {expanded[proj.name] && (
-                    <div className="sample-list">
-                      {!samples[proj.name] && <div className="loading-text">Loading samples…</div>}
-                      {samples[proj.name]?.length === 0 && (
-                        <div style={{ padding: "8px 14px 8px 28px", fontSize: 12, color: "#94a3b8" }}>
-                          No FASTQ files in download/
-                        </div>
-                      )}
-                      {samples[proj.name]?.map((s) => (
-                        <div
-                          key={s.r1}
-                          className={`sample-item ${selectedSample?.r1 === s.r1 ? "active" : ""}`}
-                          onClick={() => selectSample(proj.name, s)}
-                        >
-                          <div className="sample-name-row">
-                            <div className="sample-name" title={s.sample}>{s.sample}</div>
-                            <span className={`read-badge ${s.paired ? "badge-pe" : "badge-se"}`}>
-                              {s.paired ? "PE" : "SE"}
-                            </span>
-                          </div>
-                          <div className="sample-files">
-                            {s.paired ? (
-                              <>
+                    {proj.path && <div className="list-path" title={proj.path}>{proj.path}</div>}
+                    <div className="list-meta">
+                      {proj.fastq_count} FASTQ
+                      {proj.kraken_runs?.length > 0 &&
+                        ` · ${proj.kraken_runs.length} Kraken run${proj.kraken_runs.length > 1 ? "s" : ""}`}
+                    </div>
+                    {expanded[proj.name] && (
+                      <div className="sample-list">
+                        {!samples[proj.name] && <div className="loading-text">Loading samples…</div>}
+                        {samples[proj.name]?.length === 0 && (
+                          <div className="empty-msg" style={{ paddingLeft: 4 }}>No FASTQ files in download/</div>
+                        )}
+                        {samples[proj.name]?.map((s) => (
+                          <div
+                            key={s.r1}
+                            className={`sample-item ${selectedSample?.r1 === s.r1 ? "active" : ""}`}
+                            onClick={() => selectSample(proj.name, s)}
+                          >
+                            <div className="sample-name-row">
+                              <div className="sample-name" title={s.sample}>{s.sample}</div>
+                              <span className={`read-badge ${s.paired ? "badge-pe" : "badge-se"}`}>
+                                {s.paired ? "PE" : "SE"}
+                              </span>
+                            </div>
+                            <div className="sample-files">
+                              {s.paired ? (
+                                <>
+                                  <div className="sample-file-row">
+                                    <span className="file-label">R1</span>
+                                    <span className="file-name" title={s.r1_name}>{s.r1_name}</span>
+                                    <span className="file-size">{fmtSize(s.r1_size)}</span>
+                                  </div>
+                                  <div className="sample-file-row">
+                                    <span className="file-label">R2</span>
+                                    <span className="file-name" title={s.r2_name}>{s.r2_name}</span>
+                                    <span className="file-size">{fmtSize(s.r2_size)}</span>
+                                  </div>
+                                </>
+                              ) : (
                                 <div className="sample-file-row">
-                                  <span className="file-label">R1</span>
                                   <span className="file-name" title={s.r1_name}>{s.r1_name}</span>
-                                  <span style={{ fontSize: 10, color: "#64748b", flexShrink: 0 }}>{fmtSize(s.r1_size)}</span>
+                                  <span className="file-size">{fmtSize(s.r1_size)}</span>
                                 </div>
-                                <div className="sample-file-row">
-                                  <span className="file-label">R2</span>
-                                  <span className="file-name" title={s.r2_name}>{s.r2_name}</span>
-                                  <span style={{ fontSize: 10, color: "#64748b", flexShrink: 0 }}>{fmtSize(s.r2_size)}</span>
-                                </div>
-                              </>
-                            ) : (
-                              <div className="sample-file-row">
-                                <span className="file-name" title={s.r1_name}>{s.r1_name}</span>
-                                <span style={{ fontSize: 10, color: "#64748b", flexShrink: 0 }}>{fmtSize(s.r1_size)}</span>
-                              </div>
-                            )}
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </aside>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
 
-          {/* CENTER — run form + log */}
-          <main className="panel-center">
-            {/* Run form */}
-            <div className="run-form">
+            {/* RIGHT — selected sample details */}
+            <section className="panel">
+              <h2>Selected Sample</h2>
               {selectedSample ? (
-                <div className="selected-sample-box">
-                  <div className="selected-sample-title">Selected Sample</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                    <div className="selected-sample-name">{selectedSample.sample}</div>
+                <div className="selection-box">
+                  <div className="sel-title">Ready to run</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span className="sel-name">{selectedSample.sample}</span>
                     <span className={`read-badge ${selectedSample.paired ? "badge-pe" : "badge-se"}`}>
                       {selectedSample.paired ? "Paired-end" : "Single-end"}
                     </span>
                   </div>
-                  <div style={{ fontSize: 11, color: "#475569" }}>
-                    <div className="sample-file-row" style={{ marginBottom: 1 }}>
-                      {selectedSample.paired && <span className="file-label" style={{ color: "#93c5fd" }}>R1</span>}
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                            title={selectedSample.r1_name}>{selectedSample.r1_name}</span>
-                    </div>
-                    {selectedSample.r2_name && (
-                      <div className="sample-file-row">
-                        <span className="file-label" style={{ color: "#93c5fd" }}>R2</span>
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                              title={selectedSample.r2_name}>{selectedSample.r2_name}</span>
-                      </div>
-                    )}
+                  <div className="sel-row">
+                    {selectedSample.paired && <span className="file-label">R1</span>}
+                    <span className="file-name" title={selectedSample.r1_name}>{selectedSample.r1_name}</span>
                   </div>
-                  <div style={{ fontSize: 11, color: "#1d4ed8", marginTop: 5 }}>
-                    Project: {selectedSample.project}
+                  {selectedSample.r2_name && (
+                    <div className="sel-row">
+                      <span className="file-label">R2</span>
+                      <span className="file-name" title={selectedSample.r2_name}>{selectedSample.r2_name}</span>
+                    </div>
+                  )}
+                  <div style={{ marginTop: 2 }}>
+                    <span className="muted">Project:</span> <strong>{selectedSample.project}</strong>
                   </div>
                 </div>
               ) : (
-                <div className="no-sample-msg">
-                  ← Select a sample from a project to run Kraken classification
+                <div className="empty-msg">
+                  Select a sample from a project on the left to configure and run Kraken classification.
                 </div>
               )}
+            </section>
+          </div>
+        )}
+
+        {/* ════════════════════════════════════════════════════════ */}
+        {/* SECTION: Run Kraken — configure + results               */}
+        {/* ════════════════════════════════════════════════════════ */}
+        <div className="row-header">
+          <h2>Run Kraken</h2>
+          <button className="ghost" onClick={() => setShowRun(!showRun)}>
+            {showRun ? "Hide" : "Show"}
+          </button>
+        </div>
+        {showRun && (
+          <div className="row-grid row-grid-split">
+            {/* LEFT — configure & run */}
+            <section className="panel">
+              <h2>Configure &amp; Run</h2>
 
               <div className="form-section">
                 <label className="form-label">Target Taxon</label>
                 <input
-                  className="form-input"
                   placeholder='e.g. "Mycobacterium tuberculosis complex"'
                   value={taxon}
                   onChange={(e) => setTaxon(e.target.value)}
@@ -391,10 +516,9 @@ export default function App() {
               <div className="form-section">
                 <label className="form-label">
                   Kraken2 DB path
-                  {!krakenDb && <span style={{ color: "#b85a3e", marginLeft: 6, fontSize: 11 }}>⚠ not configured</span>}
+                  {!krakenDb && <span style={{ color: "var(--danger)", marginLeft: 6, fontSize: 11 }}>⚠ not configured</span>}
                 </label>
                 <input
-                  className="form-input"
                   placeholder="/srv/kapurlab/databases/kraken2/k2_standard"
                   value={krakenDb}
                   onChange={(e) => setKrakenDb(e.target.value)}
@@ -405,7 +529,6 @@ export default function App() {
               <div className="form-section">
                 <label className="form-label">BLAST DB path (or name)</label>
                 <input
-                  className="form-input"
                   placeholder="nt  or  /srv/kapurlab/databases/blast/nt"
                   value={blastDb}
                   onChange={(e) => setBlastDb(e.target.value)}
@@ -420,14 +543,67 @@ export default function App() {
               >
                 {running ? "Running…" : "▶ Run Kraken ID Parse"}
               </button>
-            </div>
+              {!selectedSample && (
+                <div className="note">Select a sample first to enable the run.</div>
+              )}
+            </section>
 
-            {/* Log stream */}
-            <div className="log-panel">
-              <div className="log-header">
-                <div className={`status-dot status-${jobStatus}`} />
-                <span className="log-title">
-                  {jobStatus === "idle" && "Log"}
+            {/* RIGHT — results */}
+            <section className="panel">
+              <div className="panel-header">
+                <h2>Results</h2>
+                {jobId && <span className="muted" style={{ fontSize: 12 }}>job {jobId.slice(0, 8)}</span>}
+              </div>
+              {results.length === 0 ? (
+                <div className="empty-msg">
+                  {jobStatus === "succeeded" ? "No output files found." : "Run a sample to see results here."}
+                </div>
+              ) : (
+                <div className="results-list">
+                  {results.map((f) => {
+                    const base = `./api/jobs/${jobId}/file?path=${encodeURIComponent(f.name)}`;
+                    const displayName = f.label || f.name;
+                    return (
+                      <div key={f.name} className="results-item">
+                        <span className="result-icon">{fileIcon(f.name)}</span>
+                        {f.openable ? (
+                          <a className="result-name result-link" href={`${base}&inline=1`}
+                             target="_blank" rel="noopener noreferrer" title={`Open ${f.name}`}>
+                            {displayName}
+                          </a>
+                        ) : (
+                          <a className="result-name result-link" href={`${base}&inline=0`}
+                             title={`Download ${f.name}`}>
+                            {displayName}
+                          </a>
+                        )}
+                        <span className="result-size">{fmtSize(f.size)}</span>
+                        <a className="result-download" href={`${base}&inline=0`} title={`Download ${f.name}`}>⬇</a>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+
+        {/* ════════════════════════════════════════════════════════ */}
+        {/* SECTION: Pipeline Log                                   */}
+        {/* ════════════════════════════════════════════════════════ */}
+        <div className="row-header">
+          <h2>Pipeline Log</h2>
+          <button className="ghost" onClick={() => setShowLogs(!showLogs)}>
+            {showLogs ? "Hide" : "Show"}
+          </button>
+        </div>
+        {showLogs && (
+          <div className="row-grid row-grid-single">
+            <section className="panel">
+              <div className="log-meta">
+                <span className="dot" data-state={jobStatus} />
+                <span style={{ fontWeight: 600 }}>
+                  {jobStatus === "idle" && "Idle"}
                   {jobStatus === "running" && "Running"}
                   {jobStatus === "succeeded" && "Done"}
                   {jobStatus === "failed" && "Failed"}
@@ -435,120 +611,24 @@ export default function App() {
                 {jobStatus === "running" && currentStep && (
                   <span className="log-step" title={currentStep}>— {currentStep}</span>
                 )}
-                {jobId && (
-                  <span style={{ fontSize: 11, color: "#475569", marginLeft: "auto", flexShrink: 0 }}>
-                    job {jobId.slice(0, 8)}
+              </div>
+              <div className="log" ref={logRef}>
+                {logLines.length === 0 ? (
+                  <span className="log-placeholder">
+                    {jobStatus === "idle"
+                      ? "Select a sample and click Run to start."
+                      : "Waiting for output…"}
                   </span>
+                ) : (
+                  logLines.map((line, i) => (
+                    <div key={i} className={logLineClass(line)}>{line}</div>
+                  ))
                 )}
               </div>
-              <div className="log-body">
-                <div className="log-content" ref={logRef}>
-                  {logLines.length === 0 && (
-                    <span className="log-placeholder">
-                      {jobStatus === "idle"
-                        ? "Select a sample and click Run to start."
-                        : "Waiting for output…"}
-                    </span>
-                  )}
-                  {logLines.map((line, i) => (
-                    <div key={i} className={logLineClass(line)}>{line}</div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </main>
-
-          {/* RIGHT — results */}
-          <aside className="panel-right">
-            <div className="panel-title">Results</div>
-            <div className="results-list">
-              {results.length === 0 ? (
-                <div className="no-results">
-                  {jobStatus === "succeeded"
-                    ? "No output files found."
-                    : "Run a sample to see results here."}
-                </div>
-              ) : (
-                results.map((f) => {
-                  const base = `./api/jobs/${jobId}/file?path=${encodeURIComponent(f.name)}`;
-                  const displayName = f.label || f.name;
-                  return (
-                    <div key={f.name} className="result-file">
-                      <span className="result-icon">{fileIcon(f.name)}</span>
-                      {f.openable ? (
-                        <a className="result-name result-link" href={`${base}&inline=1`}
-                           target="_blank" rel="noopener noreferrer" title={`Open ${f.name}`}>
-                          {displayName}
-                        </a>
-                      ) : (
-                        <a className="result-name result-link" href={`${base}&inline=0`}
-                           title={`Download ${f.name}`}>
-                          {displayName}
-                        </a>
-                      )}
-                      <span className="result-size">{fmtSize(f.size)}</span>
-                      <a className="result-download" href={`${base}&inline=0`}
-                         title={`Download ${f.name}`}>⬇</a>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </aside>
-        </div>
-
-        {/* Settings modal */}
-        {showSettings && (
-          <div className="modal-overlay" onClick={() => setShowSettings(false)}>
-            <div className="modal" onClick={(e) => e.stopPropagation()}>
-              <h2>⚙ Settings</h2>
-
-              <div className="form-section">
-                <label className="form-label">Kraken2 database path</label>
-                <input
-                  className="form-input"
-                  placeholder="/srv/kapurlab/databases/kraken2/k2_standard"
-                  value={settingsDraft.kraken_db || ""}
-                  onChange={(e) => setSettingsDraft((d) => ({ ...d, kraken_db: e.target.value }))}
-                />
-                <div className="form-hint">
-                  Directory containing hash.k2d, opts.k2d, taxo.k2d
-                </div>
-              </div>
-
-              <div className="form-section">
-                <label className="form-label">BLAST database path or name</label>
-                <input
-                  className="form-input"
-                  placeholder="nt"
-                  value={settingsDraft.blast_db || ""}
-                  onChange={(e) => setSettingsDraft((d) => ({ ...d, blast_db: e.target.value }))}
-                />
-                <div className="form-hint">
-                  Use "nt" for NCBI remote, or an absolute path to a local BLAST db
-                </div>
-              </div>
-
-              <div className="form-section">
-                <label className="form-label">Personal projects root</label>
-                <input
-                  className="form-input"
-                  value={settingsDraft.projects_root || ""}
-                  onChange={(e) => setSettingsDraft((d) => ({ ...d, projects_root: e.target.value }))}
-                />
-                <div className="form-hint">
-                  Shared projects at /srv/kapurlab/projects/ are always visible
-                </div>
-              </div>
-
-              <div className="modal-actions">
-                <button className="btn-cancel" onClick={() => setShowSettings(false)}>Cancel</button>
-                <button className="btn-save" onClick={saveSettings}>Save</button>
-              </div>
-            </div>
+            </section>
           </div>
         )}
-      </div>
-    </>
+      </main>
+    </div>
   );
 }

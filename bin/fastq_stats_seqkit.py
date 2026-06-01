@@ -12,7 +12,7 @@ import argparse
 import textwrap
 import humanize
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
 
 class FASTQ_Container:
     """Provide nested dot notation to object for each read with stats"""
@@ -122,9 +122,7 @@ class FASTQ_Stats(Setup):
         blast_banner = Banner("FASTQ Quality")
         print(r'\begin{table}[H]', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{center}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
         print(r'\small', file=tex)
@@ -146,10 +144,12 @@ class FASTQ_Stats(Setup):
             print(f'Average Read Length & {self.R1.avg_len} & N/A \\\\', file=tex)
         
         print(r'\hline', file=tex)
+        # Environments must close in LIFO order: tabular (innermost) before the
+        # adjustbox that wraps it. Closing adjustbox first left tabular open and
+        # aborted the whole PDF ("Something's wrong--perhaps a missing \item").
+        print(r'\end{tabular}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         print(r'\vspace{0.1 mm}', file=tex)
-        print(r'\end{tabular}', file=tex)
-        print(r'\\', file=tex)
         print(r'\end{table}', file=tex)
     
     def excel(self, excel_dict):
@@ -233,7 +233,7 @@ def main():
     for files in ('*.aux', '*.log', '*tex', '*png', '*out'):
         files_grab.extend(glob.glob(files))
     for each in files_grab:
-        shutil.move(each, temp_dir)
+        safe_move(each, temp_dir)
 
     if args.debug is False:
         shutil.rmtree(temp_dir)

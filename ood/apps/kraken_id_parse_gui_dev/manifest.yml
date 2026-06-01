@@ -1,0 +1,7 @@
+---
+name: Kraken ID Parse (dev)
+description: "Dev: branch-picker test environment. Not for production data."
+icon: fa://flask
+category: Bioinformatics
+subcategory: Contamination Screening (dev)
+role: batch_connect

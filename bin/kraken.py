@@ -11,12 +11,11 @@ import textwrap
 import pandas as pd
 import multiprocessing
 multiprocessing.set_start_method('spawn', True)
-import matplotlib.pyplot as plt
-plt.style.use('seaborn-v0_8-colorblind')
-from matplotlib import pyplot as plt
-cmap = plt.get_cmap('coolwarm')
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, apply_mpl_style
+
+plt = apply_mpl_style()
+cmap = plt.get_cmap('coolwarm')
 
 class Kraken_Identification(Setup):
     ''' 
@@ -77,8 +76,11 @@ class Kraken_Identification(Setup):
         if self.directory:
             if not os.path.exists(self.directory):
                 os.mkdir(self.directory)
-            shutil.move(report, self.directory)
-            shutil.move(output, self.directory)
+            for src in (report, output):
+                dst = os.path.join(self.directory, os.path.basename(src))
+                if os.path.exists(dst):
+                    os.remove(dst)
+                shutil.move(src, self.directory)
             self.report = f'{cwd}/{self.directory}/{sample_name}_reportkraken.txt'
             self.output = f'{cwd}/{self.directory}/{sample_name}_outputkraken.txt'
             log_file = open("kraken_log.txt", "a")
@@ -87,6 +89,9 @@ class Kraken_Identification(Setup):
             except OSError:
                 log_file.write(f'DB used: {self.kraken_db}')
             log_file.close()
+            dst_log = os.path.join(self.directory, "kraken_log.txt")
+            if os.path.exists(dst_log):
+                os.remove(dst_log)
             shutil.move("kraken_log.txt", self.directory)
 
     def krona_make_graph(self, report):
@@ -104,6 +109,9 @@ class Kraken_Identification(Setup):
             print(f'\n### Error: Krona HTML did not complete')
             sys.exit(0)
         if self.directory:
+            dst = os.path.join(self.directory, f'{self.sample_name}_{self.date_stamp}_krona.html')
+            if os.path.exists(dst):
+                os.remove(dst)
             shutil.move(f'{self.sample_name}_{self.date_stamp}_krona.html', self.directory)
             self.krona_html = f'{self.cwd}/{self.directory}/{self.sample_name}_{self.date_stamp}_krona.html'
             
@@ -114,6 +122,9 @@ class Kraken_Identification(Setup):
         os.remove(f'{self.sample_name}-bracken.txt')
         self.bracken_excel = f'{os.getcwd()}/{self.sample_name}-bracken.xlsx'
         if self.directory:
+            dst = os.path.join(self.directory, f'{self.sample_name}-bracken.xlsx')
+            if os.path.exists(dst):
+                os.remove(dst)
             shutil.move(f'{self.sample_name}-bracken.xlsx', self.directory)
             self.bracken_excel = f'{os.getcwd()}/{self.directory}/{self.sample_name}-bracken.xlsx'
 

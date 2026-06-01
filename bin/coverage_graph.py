@@ -8,11 +8,13 @@ import random
 import string
 import re
 import glob
+import json
 from collections import Counter
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-plt.style.use('seaborn-v0_8-colorblind')
+from file_setup import apply_mpl_style
+
+plt = apply_mpl_style()
 from matplotlib import cm, colormaps
 import pysam
 from Bio import SeqIO
@@ -39,6 +41,8 @@ class Coverage_Graph(Setup):
         """)
             sys.exit(1)
         self.output_pdf = None
+        self.output_png = None
+        self.output_stats_json = None
         self.alignment_stats = {}
         self.cmap = colormaps['jet']
 
@@ -241,8 +245,28 @@ class Coverage_Graph(Setup):
         # Save plot
         random_part = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
         output_pdf = f'{sample_name}-{random_part}-coverage_graph.pdf'
+        output_png = f'{sample_name}-{random_part}-coverage_graph.png'
+        output_stats_json = f'{sample_name}-{random_part}-coverage_stats.json'
         plt.savefig(output_pdf, bbox_inches='tight')
+        plt.savefig(output_png, format='png', dpi=180, bbox_inches='tight')
+        with open(output_stats_json, "w", encoding="utf-8") as stats_handle:
+            json.dump(
+                [
+                    {
+                        "reference": ref_id,
+                        "header": stats["header"],
+                        "length": int(stats["length"]),
+                        "mean_coverage": round(float(stats["mean_coverage"]), 1),
+                        "percent_covered": round(float(stats["percent_covered"]), 1),
+                    }
+                    for ref_id, stats in self.alignment_stats.items()
+                ],
+                stats_handle,
+                indent=2,
+            )
         self.output_pdf = output_pdf
+        self.output_png = output_png
+        self.output_stats_json = output_stats_json
 
         if self.debug:
             print(f"\nCreated coverage graph: {output_pdf}")
@@ -274,16 +298,12 @@ class Coverage_Graph(Setup):
         # Coverage banner
         print(r'\begin{figure}', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print(f'\\includegraphics[scale=1]{{{coverage_banner.banner}}}', file=tex)
-        print(r'\end{center}', file=tex)
         print(r'\end{adjustbox}', file=tex)
 
         # Add coverage graph
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print(f'\\includegraphics[width=\\textwidth]{{{self.output_pdf}}}', file=tex)
-        print(r'\end{center}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         print(r'\caption{Coverage depth analysis showing read alignment depth across reference sequences.}', file=tex)
         print(r'\end{figure}', file=tex)

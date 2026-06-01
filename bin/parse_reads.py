@@ -224,9 +224,7 @@ class ParseReads(Setup):
         
         # Banner at the top
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print(f'\\includegraphics[scale=1]{{{kraken_banner.banner}}}', file=tex)
-        print(r'\end{center}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         
         # First table with matching width

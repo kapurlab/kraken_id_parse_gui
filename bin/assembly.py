@@ -13,7 +13,7 @@ import textwrap
 import numpy as np
 from Bio import SeqIO
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
 
 from fastq_stats_seqkit import FASTQ_Stats
 
@@ -53,21 +53,29 @@ class Assemble(Setup):
         debug = self.debug
 
         self.print_run_time('SPAdes')
+        print('  SPAdes assembling filtered reads (this usually takes 2-4 minutes)...', flush=True)
         if len(FASTQ_list) == 2:
-            subprocess.run(["spades.py", "-1", FASTQ_list[0], "-2", FASTQ_list[1], "-o", "spades_assembly"], capture_output=True)
+            spades_cmd = ["spades.py", "-1", FASTQ_list[0], "-2", FASTQ_list[1], "-o", "spades_assembly"]
         elif len(FASTQ_list) == 1:
-            subprocess.run(["spades.py", "-s", FASTQ_list[0], "-o", "spades_assembly"], capture_output=True)
+            spades_cmd = ["spades.py", "-s", FASTQ_list[0], "-o", "spades_assembly"]
         else:
             print(f'\n### Must have either single or paired read set.\n')
             sys.exit(0)
-        
+        result = subprocess.run(spades_cmd, capture_output=True, text=True)
+
         if os.path.exists(f'{cwd}/spades_assembly/scaffolds.fasta'):
             shutil.copy2(f'{cwd}/spades_assembly/scaffolds.fasta', f'{cwd}/{self.sample_name}.fasta')
             self.FASTA = f'{cwd}/{self.sample_name}.fasta'
+            print('  SPAdes assembly complete.', flush=True)
         else:
-            print(f'\n### SPAdes did not complete, see log\n')
+            # Surface why SPAdes failed instead of swallowing it — the tail of
+            # SPAdes' own output is far more useful than "Likely due to input reads".
+            print(f'\n### SPAdes did not complete (exit {result.returncode}). Last output:', flush=True)
+            tail = (result.stderr or result.stdout or '').strip().splitlines()[-15:]
+            for line in tail:
+                print(f'    {line}', flush=True)
             raise SPAdesDidNotAssembleFASTA(f'SPAdes assembly fails - Likely due to input reads')
-        
+
         if not debug:
             shutil.rmtree(f'{cwd}/spades_assembly')
 
@@ -148,9 +156,7 @@ class Assemble(Setup):
         blast_banner = Banner("Assembly")
         print(r'\begin{table}[H]', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
         print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{center}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
         print(r'\begin{tabular}{ l | l | l | l | l | l }', file=tex)
@@ -158,10 +164,11 @@ class Assemble(Setup):
         print(r'\hline', file=tex)
         print(f'{self.contig_count:,} & {self.small_contigs_count:,} | {self.mid_size:,} | {self.greater_one_kb_count:,} & {self.longest_contig:,} & {self.total_contig_lengths:,} & {self.n50:,} & {self.mean_coverage:,.1f}X \\\\', file=tex)
         print(r'\hline', file=tex)
+        # Close tabular before the adjustbox that wraps it (LIFO); the stray
+        # vertical-mode \\ is dropped. Wrong order aborted the PDF compile.
+        print(r'\end{tabular}', file=tex)
         print(r'\end{adjustbox}', file=tex)
         print(r'\vspace{0.1 mm}', file=tex)
-        print(r'\end{tabular}', file=tex)
-        print(r'\\', file=tex)
         # print(r'\begin{flushleft}Results provided by: \href{https://blast.ncbi.nlm.nih.gov/Blast.cgi}{BLAST}\end{flushleft}', file=tex)
         print(r'\end{table}', file=tex)
 
@@ -217,7 +224,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     for files in ('*.aux', '*.log', '*tex', '*png', '*out'):
         files_grab.extend(glob.glob(files))
     for each in files_grab:
-        shutil.move(each, temp_dir)
+        safe_move(each, temp_dir)
 
     if args.debug is False:
         shutil.rmtree(temp_dir)

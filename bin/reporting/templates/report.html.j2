@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kraken ID Parse Report - {{ report.sample_id }}</title>
+  <style>
+    :root {
+      --ink: #111;
+      --rule: #111;
+      --banner: #3f4d82;
+      --banner-dark: #303b66;
+      --link: #006d77;
+      --muted: #555;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      color: var(--ink);
+      background: #fff;
+      font-family: Helvetica, Arial, sans-serif;
+      font-size: 12pt;
+      line-height: 1.15;
+    }
+    main {
+      width: 7.5in;
+      margin: 0 auto;
+      padding: 0.45in 0 0.6in;
+    }
+    .page {
+      position: relative;
+    }
+    .page + .page {
+      break-before: page;
+      page-break-before: always;
+    }
+    .report-header {
+      border-bottom: 1px solid var(--rule);
+      padding-top: 0.1in;
+      padding-bottom: 0.12in;
+      margin-bottom: 0.22in;
+      text-align: right;
+      font-size: 15pt;
+      font-weight: 700;
+    }
+    .sample {
+      margin: 0 0 0.26in;
+      font-size: 15pt;
+      font-weight: 700;
+    }
+    .banner {
+      margin: 0.18in 0 0.02in;
+      padding: 0.055in 0.08in 0.045in;
+      color: #fff;
+      background: linear-gradient(#4c5b91, var(--banner-dark));
+      border-radius: 2px;
+      font-weight: 700;
+      font-size: 11pt;
+    }
+    .banner:first-of-type { margin-top: 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0 0 0.28in;
+      font-size: 10pt;
+    }
+    th, td {
+      border-bottom: 0.6pt solid var(--rule);
+      border-right: 0.6pt solid var(--rule);
+      padding: 0.035in 0.08in;
+      text-align: left;
+      vertical-align: top;
+      font-weight: 400;
+    }
+    th:last-child, td:last-child { border-right: 0; }
+    tr:first-child th, thead tr:first-child th { border-top: 0; }
+    .quality-table {
+      font-size: 15pt;
+      margin-bottom: 0.36in;
+    }
+    .quality-table th,
+    .quality-table td {
+      padding: 0.025in 0.12in;
+    }
+    .quality-table th:first-child {
+      width: 30%;
+    }
+    .metric-table {
+      font-size: 15pt;
+      width: 100%;
+    }
+    .metric-table th { width: 34%; }
+    .lineage-table {
+      font-size: 15pt;
+      margin-bottom: 0.42in;
+    }
+    .lineage-table th:nth-child(1),
+    .lineage-table td:nth-child(1) { width: 67%; }
+    .lineage-table th:nth-child(2),
+    .lineage-table td:nth-child(2) { text-align: center; width: 9%; }
+    .lineage-table th:nth-child(3),
+    .lineage-table td:nth-child(3),
+    .lineage-table th:nth-child(4),
+    .lineage-table td:nth-child(4) { text-align: right; width: 12%; }
+    .assembly-table {
+      font-size: 8pt;
+      margin-bottom: 0.3in;
+    }
+    .blast-table {
+      font-size: 8pt;
+      margin-bottom: 0.08in;
+    }
+    .blast-table th:nth-child(1),
+    .blast-table td:nth-child(1) { width: 11%; }
+    .blast-table th:nth-child(2),
+    .blast-table td:nth-child(2) { width: 8%; }
+    .numeric { text-align: right; white-space: nowrap; }
+    .center { text-align: center; }
+    .pie {
+      display: block;
+      max-width: 6.2in;
+      max-height: 3.75in;
+      margin: 0.04in auto 0.14in;
+    }
+    .identified {
+      margin: 0.04in 0 0.34in;
+      text-align: center;
+      font-size: 12pt;
+    }
+    a {
+      color: var(--ink);
+      text-decoration: none;
+      border: 1px solid #00bcd4;
+      padding: 0 1px;
+    }
+    .provided {
+      margin-top: 0;
+      font-size: 12pt;
+    }
+    .coverage-figure {
+      margin-top: 0.08in;
+      text-align: center;
+    }
+    .coverage-figure img {
+      max-width: 100%;
+      max-height: 5.35in;
+      object-fit: contain;
+    }
+    .caption {
+      margin: 0.08in 0 0.18in;
+      text-align: center;
+      font-size: 10pt;
+    }
+    .note {
+      color: var(--muted);
+      font-size: 10pt;
+    }
+    .screen-only {
+      margin-top: 0.35in;
+      color: var(--muted);
+      font-size: 10pt;
+    }
+    .screen-only ul {
+      columns: 2;
+      padding-left: 1.2em;
+    }
+    @page {
+      size: Letter;
+      margin: 0.5in;
+    }
+    @media print {
+      main {
+        width: auto;
+        margin: 0;
+        padding: 0;
+      }
+      .page {
+        min-height: 0;
+      }
+      .screen-only {
+        display: none;
+      }
+      table, .banner, .coverage-figure {
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+    }
+    @media (max-width: 820px) {
+      main {
+        width: auto;
+        padding: 16px;
+      }
+      .page {
+        min-height: 0;
+        break-after: auto;
+        break-before: auto;
+        page-break-after: auto;
+        page-break-before: auto;
+      }
+      .quality-table,
+      .metric-table,
+      .lineage-table {
+        font-size: 12pt;
+      }
+      .screen-only ul {
+        columns: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+{% set legacy = report.legacy_report %}
+{% macro date_header() -%}
+  <div class="report-header">{{ report.report_date }}</div>
+{%- endmacro %}
+{% macro banner(title) -%}
+  <div class="banner">{{ title }}</div>
+{%- endmacro %}
+<main>
+  <section class="page">
+    {{ date_header() }}
+    <div class="sample">Sample: {{ report.sample_id }}</div>
+
+    {{ banner("FASTQ Quality") }}
+    <table class="quality-table">
+      <tbody>
+        <tr>
+          <th>Filename</th>
+          {% for row in legacy.fastq if row.filename %}
+          <td>{{ row.filename }}</td>
+          {% endfor %}
+        </tr>
+        <tr>
+          <th>File Size</th>
+          {% for row in legacy.fastq if row.filename %}
+          <td>{{ row.file_size }}</td>
+          {% endfor %}
+        </tr>
+        <tr>
+          <th>Q30 Passing</th>
+          {% for row in legacy.fastq if row.filename %}
+          <td>{{ row.q30 }}</td>
+          {% endfor %}
+        </tr>
+        <tr>
+          <th>Mean Read Score</th>
+          {% for row in legacy.fastq if row.filename %}
+          <td>{{ row.mean_score|fmt(1) }}</td>
+          {% endfor %}
+        </tr>
+        <tr>
+          <th>Average Read Length</th>
+          {% for row in legacy.fastq if row.filename %}
+          <td>{{ row.avg_length|fmt(1) }}</td>
+          {% endfor %}
+        </tr>
+      </tbody>
+    </table>
+
+    {% if report.artifacts | selectattr("name", "equalto", "bracken_pie.png") | list %}
+      {{ banner("FASTQ Identifications") }}
+      <img class="pie" src="{{ asset_url("bracken_pie.png") }}" alt="FASTQ read identification pie chart">
+      <p class="identified">Identified using: <a href="https://ccb.jhu.edu/software/kraken2/">Kraken</a> and <a href="https://ccb.jhu.edu/software/bracken/">Bracken</a></p>
+    {% endif %}
+
+    {{ banner("Kraken Classification") }}
+    <table class="metric-table">
+      <tbody>
+        <tr><th>Metric</th><th>Value</th></tr>
+        <tr><td>Target Taxon</td><td>{{ legacy.target.taxon or report.parameters.taxon }}</td></tr>
+        <tr><td>Taxon ID</td><td>{{ legacy.target.taxon_id or "not recorded" }}</td></tr>
+        <tr><td>Total Input Reads</td><td>{{ legacy.target.total_input_reads|fmt }}</td></tr>
+        <tr><td>Extracted Reads</td><td>{{ legacy.target.extracted_reads|fmt }}</td></tr>
+        <tr><td>Extraction Rate</td><td>{{ legacy.target.extraction_rate|fmt(2, "%") }}</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="page">
+    {{ date_header() }}
+
+    {% if legacy.target_taxonomy %}
+      {{ banner("Kraken Detailed Classification") }}
+      <table class="lineage-table">
+        <thead>
+          <tr><th>Taxonomic Name</th><th>Level</th><th>Reads</th><th>Percent</th></tr>
+        </thead>
+        <tbody>
+        {% for row in legacy.target_taxonomy %}
+          <tr>
+            <td>{{ row.name }}</td>
+            <td class="center">{{ row.level }}</td>
+            <td class="numeric">{{ row.reads|fmt }}</td>
+            <td class="numeric">{{ row.percent|fmt(2) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    {{ banner("Assembly") }}
+    <table class="assembly-table">
+      <thead>
+        <tr>
+          <th>Contig count</th>
+          <th>Contig length counts &lt; | 301-999bp | &gt;</th>
+          <th>Longest contig</th>
+          <th>Total length</th>
+          <th>N50</th>
+          <th>FASTQ calculated mean coverage</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>{{ legacy.assembly.contig_count or "not recorded" }}</td>
+          <td>{{ legacy.assembly.contig_bins or "not recorded" }}</td>
+          <td>{{ legacy.assembly.longest_contig|fmt }}</td>
+          <td>{{ legacy.assembly.total_length|fmt }}</td>
+          <td>{{ legacy.assembly.n50|fmt }}</td>
+          <td>{{ legacy.assembly.mean_coverage or "not recorded" }}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    {{ banner("BLAST " ~ ((report.parameters.blast_db or "database").split("/")[-1]) ~ " - Assembly Identification") }}
+    {% if legacy.blast_rows %}
+      <table class="blast-table">
+        <thead><tr><th>nt base count</th><th>contigs</th><th>Description</th></tr></thead>
+        <tbody>
+        {% for row in legacy.blast_rows %}
+          <tr>
+            <td>{{ row.nt_base_count|fmt }}</td>
+            <td>{{ row.contigs }}</td>
+            <td>{{ row.description }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="note">No BLAST summary rows were found.</p>
+    {% endif %}
+    <p class="provided">Results provided by: {{ (report.parameters.blast_db or "BLAST database").split("/")[-1] }} database</p>
+  </section>
+
+  {% for figure in legacy.coverage_figures %}
+  <section class="page">
+    {{ date_header() }}
+    {{ banner("Coverage Analysis") }}
+    {% if figure.preview_path %}
+      <div class="coverage-figure">
+        <img src="{{ asset_url(figure.preview_path) }}" alt="Coverage depth analysis">
+      </div>
+      <p class="caption">Figure {{ loop.index }}: Coverage depth analysis showing read alignment depth across reference sequences.</p>
+    {% else %}
+      <p class="note">Coverage graph PDF: {{ figure.path }}</p>
+    {% endif %}
+    {% if loop.last and legacy.coverage_stats %}
+      <table class="blast-table">
+        <thead>
+          <tr><th>Reference</th><th>Length</th><th>Mean Coverage</th><th>% Genome Covered</th></tr>
+        </thead>
+        <tbody>
+        {% for row in legacy.coverage_stats %}
+          <tr>
+            <td>{{ row.header }}</td>
+            <td>{{ row.length|fmt }}</td>
+            <td>{{ row.mean_coverage|fmt(1, "X") }}</td>
+            <td>{{ row.percent_covered|fmt(1, "%") }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="caption">Table {{ loop.index }}: Alignment statistics for each reference sequence.</p>
+    {% endif %}
+  </section>
+  {% endfor %}
+
+  <section class="screen-only">
+    <p>
+      Structured run metadata is available in <code>run_manifest.json</code>. The GUI result pane exposes the full output file set;
+      the PDF report keeps the same concise scope as the legacy LaTeX report.
+    </p>
+    {% if report.warnings %}
+      <p><strong>Warnings:</strong></p>
+      <ul>
+      {% for warning in report.warnings %}
+        <li>{{ warning }}</li>
+      {% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+</main>
+</body>
+</html>

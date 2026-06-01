@@ -14,6 +14,16 @@ import multiprocessing
 from datetime import datetime
 from pathlib import Path
 
+def safe_move(src, dst):
+    """shutil.move that silently overwrites an existing destination file or directory."""
+    src_path = Path(src)
+    dst_path = Path(dst)
+    actual_dst = dst_path / src_path.name if dst_path.is_dir() else dst_path
+    if actual_dst.exists():
+        shutil.rmtree(actual_dst) if actual_dst.is_dir() else actual_dst.unlink()
+    shutil.move(str(src), str(dst))
+
+
 try:
     import svgwrite
     from cairosvg import svg2png
@@ -23,6 +33,31 @@ try:
     HAS_SVG_SUPPORT = True
 except ImportError:
     HAS_SVG_SUPPORT = False
+
+
+def apply_mpl_style(style_candidates: Optional[List[str]] = None):
+    """Apply a Matplotlib style with fallback across Matplotlib versions."""
+    import matplotlib
+
+    if not os.environ.get("MPLBACKEND"):
+        matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    candidates = style_candidates or [
+        "seaborn-v0_8-colorblind",
+        "seaborn-colorblind",
+        "seaborn-v0_8",
+        "seaborn",
+        "ggplot",
+    ]
+    for style in candidates:
+        try:
+            plt.style.use(style)
+            break
+        except OSError:
+            continue
+    return plt
+
 
 class bcolors:
     """ANSI color codes for terminal output formatting"""
@@ -426,10 +461,21 @@ class Latex_Report:
         """Finalize and compile the LaTeX document"""
         print(r'\end{document}', file=self.tex)
         self.tex.close()
-        
-        # Run pdflatex twice for proper rendering
-        for _ in range(2):
-            os.system(f'pdflatex -interaction=nonstopmode {self.tex_file} > /dev/null 2>&1') #> /dev/null 2>&1
+
+        pdf_file = self.tex_file[:-4] + '.pdf' if self.tex_file.endswith('.tex') else self.tex_file + '.pdf'
+        print('  Compiling PDF report with tectonic...', flush=True)
+        # tectonic auto-downloads missing packages and compiles in one pass
+        ret = os.system(f'tectonic "{self.tex_file}"')
+        if ret != 0 or not os.path.exists(pdf_file):
+            # fallback to pdflatex if tectonic unavailable / failed
+            print(f'  tectonic did not produce a PDF (exit {ret}); trying pdflatex...', flush=True)
+            for _ in range(2):
+                os.system(f'pdflatex -interaction=nonstopmode "{self.tex_file}" > /dev/null 2>&1')
+
+        if os.path.exists(pdf_file):
+            print(f'  PDF report generated: {pdf_file}', flush=True)
+        else:
+            print('  WARNING: PDF report was NOT generated — see the LaTeX errors above.', flush=True)
 
 class Excel_Stats:
     """Generate Excel statistics reports"""

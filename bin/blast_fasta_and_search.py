@@ -13,7 +13,7 @@ from datetime import datetime
 
 from Bio import SeqIO
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
 
 
 class Blast_Fasta(Setup, bcolors):
@@ -136,11 +136,14 @@ class Blast_Fasta(Setup, bcolors):
                     os.system('sbatch -W ./batch.sh')
                 else:
                     # Sequential processing without SLURM
-                    for split_file in self.split_file_list:
+                    total_files = len(self.split_file_list)
+                    for i, split_file in enumerate(self.split_file_list, 1):
+                        print(f'  BLAST chunk {i}/{total_files}: {split_file}', flush=True)
                         os.system(f'blastn -query {split_file} -db {blast_db} '
                                 f'-out {split_file}_blastout.txt -outfmt "{format}" '
                                 f'-num_alignments {num_alignment} -num_threads {self.cpus}')
-                
+                        print(f'  BLAST chunk {i}/{total_files} complete', flush=True)
+
                 # Concatenate results
                 concatenation = f'{self.sample_name}_blast_out.txt'
                 with open(concatenation, 'wb') as outfile:
@@ -283,9 +286,7 @@ class Blast_Fasta(Setup, bcolors):
                     blast_banner = Banner(f'BLAST {basename} - Assembly Identification - continued')
                 print(r'\begin{table}[H]', file=tex)
                 print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-                print(r'\begin{center}', file=tex)
                 print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-                print(r'\end{center}', file=tex)
                 print(r'\end{adjustbox}', file=tex)
                 print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
                 print(r'\begin{tabular}{ l | p{1.3cm} | l }', file=tex)
@@ -298,11 +299,10 @@ class Blast_Fasta(Setup, bcolors):
                     description = description.replace("_", "\_")[:108]
                     print(f'{each_row[0]} & {each_row[1]} & {description} \\\\', file=tex)
                 print(r'\hline', file=tex)
-                
+                # Close tabular before the adjustbox that wraps it (LIFO); drop stray \\.
+                print(r'\end{tabular}', file=tex)
                 print(r'\end{adjustbox}', file=tex)
                 print(r'\vspace{0.1 mm}', file=tex)
-                print(r'\end{tabular}', file=tex)
-                print(r'\\', file=tex)
                 basename_slashed = basename.replace("_", "\_")
                 print(r'\begin{flushleft}Results provided by: \href{https://blast.ncbi.nlm.nih.gov/Blast.cgi}{BLAST ' + f'{basename_slashed}' + r' database}\end{flushleft}', file=tex)
                 print(r'\end{table}', file=tex)
@@ -568,7 +568,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     for files in ('*.aux', '*.log', '*tex', '*png', '*out'):
         files_grab.extend(glob.glob(files))
     for each in files_grab:
-        shutil.move(each, temp_dir)
+        safe_move(each, temp_dir)
 
     if args.debug is False:
         shutil.rmtree(temp_dir)

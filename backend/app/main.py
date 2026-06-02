@@ -221,6 +221,79 @@ def api_project_samples(name: str):
 
 
 # ---------------------------------------------------------------------------
+# Per-sample Kraken results (decoupled from a single job).
+#
+# Results are read straight from <project>/kraken/<sample>/ on disk so any
+# previously-run sample's outputs can be revisited — not just the last job.
+# ---------------------------------------------------------------------------
+def _collect_result_files(run_dir: Path, include_all: bool) -> List[Dict]:
+    """List result files under a kraken run dir, categorized + sorted."""
+    files: List[Dict] = []
+    if not run_dir.is_dir():
+        return files
+    for p in sorted(run_dir.rglob("*")):
+        if not p.is_file() or p.name.endswith(".log"):
+            continue
+        rel = str(p.relative_to(run_dir))
+        category = _result_category(rel)
+        if not include_all and category is None:
+            continue
+        files.append({
+            "name": rel,
+            "path": str(p),
+            "label": _result_label(rel, category),
+            "size": p.stat().st_size,
+            "openable": _can_open_inline(rel),
+            "category": category,
+        })
+    if not include_all:
+        files = _dedupe_primary_results(files)
+
+    def sort_key(f):
+        category = f.get("category")
+        if category in _CATEGORY_ORDER:
+            return (_CATEGORY_ORDER[category], _TIMESTAMP_RE.sub("", f["name"]))
+        return (50, f["name"])
+
+    files.sort(key=sort_key)
+    for f in files:
+        if include_all and f.get("category") is None:
+            f["label"] = f["name"]
+    return files
+
+
+def _sample_run_status(run_dir: Path) -> str:
+    """Status for a sample: 'running' if a live job owns its dir, else 'done'
+    if the dir holds output, else 'none'."""
+    run_dir_str = str(run_dir)
+    for job in job_manager.list_jobs():
+        if job.get("cwd") == run_dir_str and job.get("status") == "running":
+            return "running"
+    try:
+        if run_dir.is_dir() and any(p.is_file() for p in run_dir.rglob("*")):
+            return "done"
+    except PermissionError:
+        pass
+    return "none"
+
+
+@app.get("/api/projects/{name}/samples/{sample}/kraken-results")
+def api_sample_kraken_results(name: str, sample: str, all: int = Query(0)):
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    run_dir = project_dir / "kraken" / sample
+    return JSONResponse({
+        "project": name,
+        "sample": sample,
+        "present": run_dir.is_dir(),
+        "status": _sample_run_status(run_dir),
+        "run_dir": str(run_dir),
+        "files": _collect_result_files(run_dir, bool(all)),
+    })
+
+
+# ---------------------------------------------------------------------------
 # Cross-tool visibility — surface vSNP results for a sample.
 #
 # vSNP GUI and this tool share /srv/kapurlab/projects, so vSNP writes its
@@ -415,9 +488,10 @@ class RunPayload(BaseModel):
     project: str
     r1: str           # absolute path to R1 FASTQ
     r2: Optional[str] = None
-    taxon: str
+    taxon: Optional[str] = None
     kraken_db: Optional[str] = None
     blast_db: Optional[str] = None
+    kraken_only: bool = False   # run only Kraken2 + Krona graph; skip parsing/assembly/BLAST
 
 
 @app.post("/api/run")
@@ -425,6 +499,14 @@ def api_run(payload: RunPayload):
     cfg = load_config()
     kraken_db = payload.kraken_db or cfg.get("kraken_db", "")
     blast_db = payload.blast_db or cfg.get("blast_db", "nt")
+    taxon = (payload.taxon or "").strip()
+
+    # Taxon drives the read-parsing/assembly/BLAST identification, which
+    # kraken-only mode skips — so it's only required for a full run.
+    if not payload.kraken_only and not taxon:
+        raise HTTPException(400, "A target taxon is required for a full run.")
+    if payload.kraken_only and not kraken_db:
+        raise HTTPException(400, "Kraken-only mode requires a Kraken DB path.")
 
     # Validate paths
     r1 = Path(payload.r1)
@@ -468,10 +550,13 @@ def api_run(payload: RunPayload):
             command.extend(["-r2", str(r2)])
         else:
             raise HTTPException(400, f"R2 file not found: {payload.r2}")
-    command.extend(["-t", payload.taxon])
+    if taxon:
+        command.extend(["-t", taxon])
     if kraken_db:
         command.extend(["-k", kraken_db])
-    if blast_db:
+    if payload.kraken_only:
+        command.append("--kraken-only")
+    elif blast_db:
         command.extend(["-b", blast_db])
 
     env = {
@@ -480,7 +565,8 @@ def api_run(payload: RunPayload):
         "PYTHONUNBUFFERED": "1",  # belt-and-suspenders with `python -u`
     }
 
-    job_name = f"{payload.project}/{sample_name} — {payload.taxon}"
+    job_label = "Kraken-only (Krona)" if payload.kraken_only else (taxon or "run")
+    job_name = f"{payload.project}/{sample_name} — {job_label}"
     job_id = job_manager.start_job(name=job_name, command=command, cwd=run_dir, env=env)
     return JSONResponse({"job_id": job_id, "run_dir": str(run_dir)})
 

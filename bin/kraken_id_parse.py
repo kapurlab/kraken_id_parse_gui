@@ -58,6 +58,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     parser.add_argument("-b", "--blast_db", action='store', dest='blast_db', default="nt", help='Specify BLAST db to use')
     parser.add_argument("-s", "--specific", action='store', dest='specific', default=None, help='Specify custom script/function for the target being used.  Often just default to the taxon name')
     parser.add_argument('-d', '--debug', action='store_true', dest='debug', default=False, help='keep temp file')
+    parser.add_argument('--kraken-only', action='store_true', dest='kraken_only', default=False, help='Run only Kraken2 and produce the Krona graph; skip read parsing, assembly, and BLAST. Requires -k.')
     parser.add_argument('-v', '--version', action='version', version=f'{os.path.basename(__file__)}: version {__version__}')
     args = parser.parse_args()
     
@@ -103,11 +104,21 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     fastq_stats.latex(latex_report.tex)
     fastq_stats.excel(excel_stats.excel_dict)
 
+    if args.kraken_only and not args.kraken_db:
+        print(f"{bcolors.RED}ERROR: --kraken-only requires a Kraken DB (-k/--kraken_db).{bcolors.ENDC}")
+        sys.exit(2)
+
     if args.kraken_db:
         kraken = Kraken_Identification(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, kraken_db=args.kraken_db, directory='kraken')
         #Bracken Pie
         kraken.run()
         krona_html = kraken.krona_make_graph(kraken.report)
+        if args.kraken_only:
+            # Kraken-only mode: the Krona graph is the deliverable. Skip Bracken,
+            # read parsing, assembly, and BLAST entirely and finish here.
+            print(f"\n{bcolors.GREEN}Kraken-only mode: Krona graph generated at {krona_html}.{bcolors.ENDC}")
+            print(f"{bcolors.GREEN}Skipping Bracken, read parsing, assembly, and BLAST.{bcolors.ENDC}")
+            sys.exit(0)
         kraken.bracken(kraken.report, kraken.output)
         bracken_pie_charts = Bracken_Pie_Charts()
         bracken_pie_charts.run(kraken.bracken_excel)

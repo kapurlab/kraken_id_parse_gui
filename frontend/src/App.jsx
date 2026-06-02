@@ -49,6 +49,7 @@ export default function App() {
   const [jobStatus, setJobStatus] = useState("idle"); // idle | running | succeeded | failed
   const [logLines, setLogLines] = useState([]);
   const [results, setResults] = useState([]);
+  const [vsnpResults, setVsnpResults] = useState(null);  // null=loading; {step1_present, files, step2}
   const [settingsDraft, setSettingsDraft] = useState({});
   const [currentStep, setCurrentStep] = useState("");
 
@@ -123,6 +124,14 @@ export default function App() {
 
   function selectSample(project, sample) {
     setSelectedSample({ project, ...sample });
+    // Cross-tool: pull whatever vSNP produced for this sample (step1 files +
+    // the latest step2 comparison it appears in). Both tools share the same
+    // project dir, so these already exist on disk if vSNP was run.
+    setVsnpResults(null);
+    fetch(`./api/projects/${encodeURIComponent(project)}/vsnp/samples/${encodeURIComponent(sample.sample)}/files`)
+      .then((r) => r.json())
+      .then(setVsnpResults)
+      .catch(() => setVsnpResults({ step1_present: false, files: [], step2: { present: false } }));
   }
 
   function startRun() {
@@ -582,6 +591,67 @@ export default function App() {
                       </div>
                     );
                   })}
+                </div>
+              )}
+
+              {/* Cross-tool: vSNP results for the selected sample */}
+              {selectedSample && (
+                <div className="vsnp-cross-tool" style={{ marginTop: 18, borderTop: "1px solid var(--border, #e2e2e2)", paddingTop: 12 }}>
+                  <h3 style={{ marginBottom: 6 }}>vSNP results — {selectedSample.sample}</h3>
+                  {vsnpResults === null ? (
+                    <div className="muted">Loading…</div>
+                  ) : (
+                    <>
+                      {!vsnpResults.step1_present ? (
+                        <div className="muted">No vSNP run for this sample yet.</div>
+                      ) : (
+                        <div className="results-list">
+                          {vsnpResults.files.map((f) => {
+                            const vbase = `./api/projects/${encodeURIComponent(selectedSample.project)}/file?path=${encodeURIComponent(f.path)}`;
+                            return (
+                              <div key={f.relpath} className="results-item">
+                                <span className="result-icon">{fileIcon(f.name)}</span>
+                                {f.openable ? (
+                                  <a className="result-name result-link" href={`${vbase}&inline=1`}
+                                     target="_blank" rel="noopener noreferrer" title={`Open ${f.name}`}>
+                                    {f.relpath}
+                                  </a>
+                                ) : (
+                                  <a className="result-name result-link" href={`${vbase}&inline=0`}
+                                     title={`Download ${f.name}`}>
+                                    {f.relpath}
+                                  </a>
+                                )}
+                                <span className="result-size">{fmtSize(f.size)}</span>
+                                <a className="result-download" href={`${vbase}&inline=0`} title={`Download ${f.name}`}>⬇</a>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {vsnpResults.step2 && vsnpResults.step2.present && (
+                        <div className="vsnp-step2" style={{ marginTop: 8 }}>
+                          {vsnpResults.step2.report_path ? (
+                            <a className="result-name result-link"
+                               href={`./api/projects/${encodeURIComponent(selectedSample.project)}/file?path=${encodeURIComponent(vsnpResults.step2.report_path)}&inline=1`}
+                               target="_blank" rel="noopener noreferrer"
+                               title="Open the latest SNP comparison report this sample appears in">
+                              📊 Latest SNP comparison{vsnpResults.step2.started_at ? ` (${vsnpResults.step2.started_at})` : ""}
+                            </a>
+                          ) : (
+                            <span className="muted">
+                              In latest SNP comparison{vsnpResults.step2.started_at ? ` (${vsnpResults.step2.started_at})` : ""}
+                            </span>
+                          )}
+                          {vsnpResults.step2.groups && vsnpResults.step2.groups.length > 0 && (
+                            <span className="muted" style={{ marginLeft: 6 }}>
+                              — group{vsnpResults.step2.groups.length > 1 ? "s" : ""}: {vsnpResults.step2.groups.join(", ")}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
             </section>

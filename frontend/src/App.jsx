@@ -40,15 +40,20 @@ export default function App() {
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [expanded, setExpanded] = useState({});          // project name → bool
   const [samples, setSamples] = useState({});            // project name → [sample]
-  const [selectedSample, setSelectedSample] = useState(null); // {project, sample, r1, r2}
+  const [checkedKeys, setCheckedKeys] = useState({});    // key → {project, ...sample}  (batch selection)
+  const [openResults, setOpenResults] = useState({});    // key → bool (inline results expanded)
+  const [sampleResults, setSampleResults] = useState({}); // key → {loading, status, present, files}
+  const [vsnpResults, setVsnpResults] = useState({});    // key → {loading, step1_present, files, step2} (cross-tool)
+  const [activeRun, setActiveRun] = useState(null);      // {project, sample} currently running
+  const [queueInfo, setQueueInfo] = useState({ total: 0, done: 0 }); // batch progress
   const [taxon, setTaxon] = useState("");
+  const [krakenOnly, setKrakenOnly] = useState(false);   // Kraken2 + Krona only, no read parsing
   const [krakenDb, setKrakenDb] = useState("");
   const [blastDb, setBlastDb] = useState("nt");
   const [running, setRunning] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [jobStatus, setJobStatus] = useState("idle"); // idle | running | succeeded | failed
   const [logLines, setLogLines] = useState([]);
-  const [results, setResults] = useState([]);
   const [settingsDraft, setSettingsDraft] = useState({});
   const [currentStep, setCurrentStep] = useState("");
 
@@ -80,7 +85,14 @@ export default function App() {
           setJobId(live.id);
           setJobStatus("running");
           setRunning(true);
-          streamLog(live.id);
+          // Reconstruct the running sample from the job name ("project/sample — taxon")
+          let samp = null;
+          const m = (live.name || "").match(/^(.*?)\/(.*?) — /);
+          if (m) {
+            samp = { project: m[1], sample: m[2] };
+            setActiveRun(samp);
+          }
+          streamLogUntilDone(live.id, samp, () => {});
         }
       })
       .catch(() => {});
@@ -121,52 +133,110 @@ export default function App() {
     }
   }
 
-  function selectSample(project, sample) {
-    setSelectedSample({ project, ...sample });
+  // --- Sample selection / results (per-sample, decoupled from a single job) ---
+  const sampleKey = (project, s) => `${project}::${s.sample}`;
+  const isActive = (project, s) =>
+    activeRun && activeRun.project === project && activeRun.sample === s.sample;
+
+  function toggleChecked(project, s) {
+    const key = sampleKey(project, s);
+    setCheckedKeys((m) => {
+      const next = { ...m };
+      if (next[key]) delete next[key];
+      else next[key] = { project, ...s };
+      return next;
+    });
   }
 
-  function startRun() {
-    if (!selectedSample || !taxon.trim()) return;
-    // Close any existing SSE stream
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    setRunning(true);
-    setJobStatus("running");
-    setLogLines([]);
-    setResults([]);
-    setCurrentStep("");
+  function loadSampleResults(project, s) {
+    const key = sampleKey(project, s);
+    setSampleResults((m) => ({ ...m, [key]: { ...(m[key] || {}), loading: true } }));
+    fetch(`./api/projects/${encodeURIComponent(project)}/samples/${encodeURIComponent(s.sample)}/kraken-results`)
+      .then((r) => r.json())
+      .then((data) => setSampleResults((m) => ({ ...m, [key]: { loading: false, ...data } })))
+      .catch(() => setSampleResults((m) => ({ ...m, [key]: { loading: false, present: false, status: "none", files: [] } })));
+  }
+
+  // Cross-tool: vSNP results for the same sample (step1 files + latest step2).
+  function loadVsnpResults(project, s) {
+    const key = sampleKey(project, s);
+    setVsnpResults((m) => ({ ...m, [key]: { ...(m[key] || {}), loading: true } }));
+    fetch(`./api/projects/${encodeURIComponent(project)}/vsnp/samples/${encodeURIComponent(s.sample)}/files`)
+      .then((r) => r.json())
+      .then((data) => setVsnpResults((m) => ({ ...m, [key]: { loading: false, ...data } })))
+      .catch(() => setVsnpResults((m) => ({ ...m, [key]: { loading: false, step1_present: false, files: [], step2: { present: false } } })));
+  }
+
+  function toggleResults(project, s) {
+    const key = sampleKey(project, s);
+    const willOpen = !openResults[key];
+    setOpenResults((m) => ({ ...m, [key]: willOpen }));
+    if (willOpen && !sampleResults[key]) loadSampleResults(project, s);
+    if (willOpen && !vsnpResults[key]) loadVsnpResults(project, s);
+  }
+
+  // Run one or more samples back-to-back (sequential — avoids overloading the
+  // box with concurrent heavy pipelines, and keeps a single coherent live log).
+  async function runSamples(list) {
+    if (running || !list.length) return;
+    if (!krakenOnly && !taxon.trim()) return;
     setShowLogs(true);
-
-    fetch("./api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project: selectedSample.project,
-        r1: selectedSample.r1,
-        r2: selectedSample.r2 || null,
-        taxon: taxon.trim(),
-        kraken_db: krakenDb.trim() || null,
-        blast_db: blastDb.trim() || null,
-      }),
-    })
-      .then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || "Run failed"); });
-        return r.json();
-      })
-      .then(({ job_id }) => {
-        setJobId(job_id);
-        streamLog(job_id);
-      })
-      .catch((err) => {
-        setLogLines([`ERROR: ${err.message}`]);
-        setRunning(false);
-        setJobStatus("failed");
-      });
+    setQueueInfo({ total: list.length, done: 0 });
+    for (let i = 0; i < list.length; i++) {
+      await runOne(list[i]);
+      setQueueInfo({ total: list.length, done: i + 1 });
+    }
+    setActiveRun(null);
   }
 
-  function streamLog(id) {
+  function runSelected() {
+    runSamples(Object.values(checkedKeys));
+  }
+
+  function runOne(samp) {
+    return new Promise((resolve) => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      setRunning(true);
+      setActiveRun({ project: samp.project, sample: samp.sample });
+      setJobStatus("running");
+      setLogLines([]);
+      setCurrentStep("");
+      // Mark this sample as running in its inline panel immediately.
+      const key = sampleKey(samp.project, samp);
+      setSampleResults((m) => ({ ...m, [key]: { ...(m[key] || {}), status: "running" } }));
+      setOpenResults((m) => ({ ...m, [key]: true }));
+
+      fetch("./api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project: samp.project,
+          r1: samp.r1,
+          r2: samp.r2 || null,
+          taxon: taxon.trim(),
+          kraken_db: krakenDb.trim() || null,
+          blast_db: blastDb.trim() || null,
+          kraken_only: krakenOnly,
+        }),
+      })
+        .then((r) => (r.ok ? r.json() : r.json().then((e) => { throw new Error(e.detail || "Run failed"); })))
+        .then(({ job_id }) => {
+          setJobId(job_id);
+          streamLogUntilDone(job_id, samp, resolve);
+        })
+        .catch((err) => {
+          setLogLines((prev) => [...prev, `ERROR: ${err.message}`]);
+          setRunning(false);
+          setJobStatus("failed");
+          resolve();
+        });
+    });
+  }
+
+  function streamLogUntilDone(id, samp, done) {
     const es = new EventSource(`./api/jobs/${id}/log`);
     eventSourceRef.current = es;
     es.onmessage = (evt) => {
@@ -179,11 +249,13 @@ export default function App() {
           .then((job) => {
             setJobStatus(job.status);
             setCurrentStep("");
-            if (job.status === "succeeded") loadResults(id);
-          });
+            if (samp) loadSampleResults(samp.project, samp); // refresh this sample's inline results
+            loadProjects();                                  // refresh kraken_runs badges
+          })
+          .catch(() => {})
+          .finally(() => done());
       } else {
         setLogLines((prev) => [...prev, data]);
-        // Extract current pipeline step for the header
         if (/Step \d+:/i.test(data) ||
             /Starting bioinformatics/i.test(data) ||
             /Generating analysis reports/i.test(data) ||
@@ -197,14 +269,8 @@ export default function App() {
       es.close();
       setRunning(false);
       setJobStatus("failed");
+      done();
     };
-  }
-
-  function loadResults(id) {
-    fetch(`./api/jobs/${id}/results`)
-      .then((r) => r.json())
-      .then(setResults)
-      .catch(() => {});
   }
 
   function saveSettings() {
@@ -278,17 +344,18 @@ export default function App() {
         {/* ── Status strip ─────────────────────────────────────── */}
         <section className="status-strip">
           <div className="status-item">
-            <span className="status-label">Project</span>
-            <span className="status-value">{selectedSample?.project || "—"}</span>
-          </div>
-          <div className="status-item">
-            <span className="status-label">Sample</span>
-            <span className="status-value">{selectedSample?.sample || "—"}</span>
-          </div>
-          <div className="status-item">
-            <span className="status-label">Reads</span>
+            <span className="status-label">Selected</span>
             <span className="status-value">
-              {selectedSample ? (selectedSample.paired ? "Paired-end" : "Single-end") : "—"}
+              {Object.keys(checkedKeys).length
+                ? `${Object.keys(checkedKeys).length} sample${Object.keys(checkedKeys).length > 1 ? "s" : ""}`
+                : "—"}
+            </span>
+          </div>
+          <div className="status-item">
+            <span className="status-label">Running</span>
+            <span className="status-value">
+              {activeRun ? activeRun.sample : "—"}
+              {queueInfo.total > 1 ? ` (${queueInfo.done}/${queueInfo.total})` : ""}
             </span>
           </div>
           <div className="status-item">
@@ -380,7 +447,7 @@ export default function App() {
                 {projects.map((proj) => (
                   <div
                     key={proj.name}
-                    className={`list-item ${selectedSample?.project === proj.name ? "active" : ""}`}
+                    className={`list-item ${activeRun?.project === proj.name ? "active" : ""}`}
                   >
                     <div className="item-top" onClick={() => toggleProject(proj.name)}>
                       <span className="expand-icon">{expanded[proj.name] ? "▾" : "▸"}</span>
@@ -399,17 +466,54 @@ export default function App() {
                         {samples[proj.name]?.length === 0 && (
                           <div className="empty-msg" style={{ paddingLeft: 4 }}>No FASTQ files in download/</div>
                         )}
-                        {samples[proj.name]?.map((s) => (
+                        {samples[proj.name]?.map((s) => {
+                          const key = sampleKey(proj.name, s);
+                          const res = sampleResults[key];
+                          const vres = vsnpResults[key];
+                          const hasRun = proj.kraken_runs?.includes(s.sample);
+                          const status = res?.status || (hasRun ? "done" : "none");
+                          const checked = !!checkedKeys[key];
+                          const open = !!openResults[key];
+                          const statusLabel =
+                            status === "running" ? "● running" : status === "done" ? "✓ results" : "not run";
+                          return (
                           <div
                             key={s.r1}
-                            className={`sample-item ${selectedSample?.r1 === s.r1 ? "active" : ""}`}
-                            onClick={() => selectSample(proj.name, s)}
+                            className={`sample-item ${isActive(proj.name, s) ? "active" : ""}`}
                           >
-                            <div className="sample-name-row">
-                              <div className="sample-name" title={s.sample}>{s.sample}</div>
+                            <div className="sample-name-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleChecked(proj.name, s)}
+                                title="Select for batch run"
+                              />
+                              <div
+                                className="sample-name"
+                                title={`${s.sample} — click to show results`}
+                                style={{ flex: 1, cursor: "pointer" }}
+                                onClick={() => toggleResults(proj.name, s)}
+                              >
+                                {s.sample}
+                              </div>
                               <span className={`read-badge ${s.paired ? "badge-pe" : "badge-se"}`}>
                                 {s.paired ? "PE" : "SE"}
                               </span>
+                              <span
+                                className={`run-status run-status-${status}`}
+                                title={`Run status: ${status}`}
+                                style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                              >
+                                {statusLabel}
+                              </span>
+                              <button
+                                className="ghost"
+                                style={{ fontSize: 11 }}
+                                onClick={() => toggleResults(proj.name, s)}
+                                title="Show/hide results for this sample"
+                              >
+                                {open ? "▾" : "▸"}
+                              </button>
                             </div>
                             <div className="sample-files">
                               {s.paired ? (
@@ -432,8 +536,116 @@ export default function App() {
                                 </div>
                               )}
                             </div>
+                            {open && (
+                              <div className="sample-results-inline" style={{ marginTop: 6, paddingLeft: 22 }}>
+                                <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+                                  <button
+                                    className="ghost action"
+                                    disabled={running || (!krakenOnly && !taxon.trim())}
+                                    onClick={() => runSamples([{ project: proj.name, ...s }])}
+                                    title={!krakenOnly && !taxon.trim() ? "Enter a target taxon first (or tick Kraken only)" : ""}
+                                  >
+                                    {status === "done" ? "↻ Re-run this sample" : "▶ Run this sample"}
+                                  </button>
+                                  <button className="ghost action" onClick={() => loadSampleResults(proj.name, s)}>
+                                    ↻ Refresh
+                                  </button>
+                                </div>
+                                {res?.loading ? (
+                                  <div className="loading-text">Loading results…</div>
+                                ) : !res || !res.present || (res.files || []).length === 0 ? (
+                                  <div className="empty-msg" style={{ paddingLeft: 0 }}>
+                                    {status === "running"
+                                      ? "Running… results will appear here when finished."
+                                      : "No Kraken results yet for this sample."}
+                                  </div>
+                                ) : (
+                                  <div className="results-list">
+                                    {res.files.map((f) => {
+                                      const base = `./api/projects/${encodeURIComponent(proj.name)}/file?path=${encodeURIComponent(f.path)}`;
+                                      return (
+                                        <div key={f.name} className="results-item">
+                                          <span className="result-icon">{fileIcon(f.name)}</span>
+                                          {f.openable ? (
+                                            <a className="result-name result-link" href={`${base}&inline=1`}
+                                               target="_blank" rel="noopener noreferrer" title={`Open ${f.name}`}>
+                                              {f.label || f.name}
+                                            </a>
+                                          ) : (
+                                            <a className="result-name result-link" href={`${base}&inline=0`}
+                                               title={`Download ${f.name}`}>
+                                              {f.label || f.name}
+                                            </a>
+                                          )}
+                                          <span className="result-size">{fmtSize(f.size)}</span>
+                                          <a className="result-download" href={`${base}&inline=0`} title={`Download ${f.name}`}>⬇</a>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+
+                                {/* Cross-tool: vSNP results for this sample */}
+                                <div className="vsnp-cross-tool" style={{ marginTop: 10, borderTop: "1px solid var(--border, #e2e2e2)", paddingTop: 8 }}>
+                                  <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>vSNP results</div>
+                                  {vres?.loading ? (
+                                    <div className="loading-text">Loading vSNP results…</div>
+                                  ) : !vres || !vres.step1_present ? (
+                                    <div className="empty-msg" style={{ paddingLeft: 0 }}>No vSNP run for this sample yet.</div>
+                                  ) : (
+                                    <>
+                                      <div className="results-list">
+                                        {(vres.files || []).map((f) => {
+                                          const vbase = `./api/projects/${encodeURIComponent(proj.name)}/file?path=${encodeURIComponent(f.path)}`;
+                                          return (
+                                            <div key={f.relpath} className="results-item">
+                                              <span className="result-icon">{fileIcon(f.name)}</span>
+                                              {f.openable ? (
+                                                <a className="result-name result-link" href={`${vbase}&inline=1`}
+                                                   target="_blank" rel="noopener noreferrer" title={`Open ${f.name}`}>
+                                                  {f.relpath}
+                                                </a>
+                                              ) : (
+                                                <a className="result-name result-link" href={`${vbase}&inline=0`}
+                                                   title={`Download ${f.name}`}>
+                                                  {f.relpath}
+                                                </a>
+                                              )}
+                                              <span className="result-size">{fmtSize(f.size)}</span>
+                                              <a className="result-download" href={`${vbase}&inline=0`} title={`Download ${f.name}`}>⬇</a>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                      {vres.step2 && vres.step2.present && (
+                                        <div className="vsnp-step2" style={{ marginTop: 6 }}>
+                                          {vres.step2.report_path ? (
+                                            <a className="result-name result-link"
+                                               href={`./api/projects/${encodeURIComponent(proj.name)}/file?path=${encodeURIComponent(vres.step2.report_path)}&inline=1`}
+                                               target="_blank" rel="noopener noreferrer"
+                                               title="Open the latest SNP comparison report this sample appears in">
+                                              📊 Latest SNP comparison{vres.step2.started_at ? ` (${vres.step2.started_at})` : ""}
+                                            </a>
+                                          ) : (
+                                            <span className="muted">
+                                              In latest SNP comparison{vres.step2.started_at ? ` (${vres.step2.started_at})` : ""}
+                                            </span>
+                                          )}
+                                          {vres.step2.groups && vres.step2.groups.length > 0 && (
+                                            <span className="muted" style={{ marginLeft: 6 }}>
+                                              — group{vres.step2.groups.length > 1 ? "s" : ""}: {vres.step2.groups.join(", ")}
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            )}
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -441,35 +653,30 @@ export default function App() {
               </div>
             </section>
 
-            {/* RIGHT — selected sample details */}
+            {/* RIGHT — samples selected for a batch run */}
             <section className="panel">
-              <h2>Selected Sample</h2>
-              {selectedSample ? (
-                <div className="selection-box">
-                  <div className="sel-title">Ready to run</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span className="sel-name">{selectedSample.sample}</span>
-                    <span className={`read-badge ${selectedSample.paired ? "badge-pe" : "badge-se"}`}>
-                      {selectedSample.paired ? "Paired-end" : "Single-end"}
-                    </span>
-                  </div>
-                  <div className="sel-row">
-                    {selectedSample.paired && <span className="file-label">R1</span>}
-                    <span className="file-name" title={selectedSample.r1_name}>{selectedSample.r1_name}</span>
-                  </div>
-                  {selectedSample.r2_name && (
-                    <div className="sel-row">
-                      <span className="file-label">R2</span>
-                      <span className="file-name" title={selectedSample.r2_name}>{selectedSample.r2_name}</span>
-                    </div>
-                  )}
-                  <div style={{ marginTop: 2 }}>
-                    <span className="muted">Project:</span> <strong>{selectedSample.project}</strong>
-                  </div>
+              <div className="panel-header">
+                <h2>Selected for run</h2>
+                {Object.keys(checkedKeys).length > 0 && (
+                  <button className="ghost action" onClick={() => setCheckedKeys({})}>Clear</button>
+                )}
+              </div>
+              {Object.keys(checkedKeys).length === 0 ? (
+                <div className="empty-msg">
+                  Check one or more samples on the left, then run them as a batch from “Run Kraken” below.
+                  Click a sample’s name to view its results inline.
                 </div>
               ) : (
-                <div className="empty-msg">
-                  Select a sample from a project on the left to configure and run Kraken classification.
+                <div className="selection-box">
+                  <div className="sel-title">{Object.keys(checkedKeys).length} sample(s) queued</div>
+                  {Object.entries(checkedKeys).map(([key, samp]) => (
+                    <div key={key} className="sel-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span className="sel-name" style={{ flex: 1 }}>{samp.sample}</span>
+                      <span className="muted" style={{ fontSize: 11 }}>{samp.project}</span>
+                      <button className="ghost" style={{ fontSize: 11 }}
+                              onClick={() => toggleChecked(samp.project, samp)} title="Remove from batch">✕</button>
+                    </div>
+                  ))}
                 </div>
               )}
             </section>
@@ -492,12 +699,27 @@ export default function App() {
               <h2>Configure &amp; Run</h2>
 
               <div className="form-section">
+                <label className="checkbox-label" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={krakenOnly}
+                    onChange={(e) => setKrakenOnly(e.target.checked)}
+                    disabled={running}
+                  />
+                  <span>Kraken only (Krona graph, no read parsing)</span>
+                </label>
+                <div className="note" style={{ marginTop: 4 }}>
+                  Runs Kraken2 and produces the Krona graph only — skips read parsing, assembly, and BLAST. No target taxon needed.
+                </div>
+              </div>
+
+              <div className="form-section">
                 <label className="form-label">Target Taxon</label>
                 <input
                   placeholder='e.g. "Mycobacterium tuberculosis complex"'
                   value={taxon}
                   onChange={(e) => setTaxon(e.target.value)}
-                  disabled={running}
+                  disabled={running || krakenOnly}
                 />
                 <div className="taxon-presets">
                   {TAXON_PRESETS.map((p) => (
@@ -505,7 +727,7 @@ export default function App() {
                       key={p}
                       className={`preset-btn ${taxon === p ? "active" : ""}`}
                       onClick={() => setTaxon(p)}
-                      disabled={running}
+                      disabled={running || krakenOnly}
                     >
                       {p}
                     </button>
@@ -532,56 +754,51 @@ export default function App() {
                   placeholder="nt  or  /srv/kapurlab/databases/blast/nt"
                   value={blastDb}
                   onChange={(e) => setBlastDb(e.target.value)}
-                  disabled={running}
+                  disabled={running || krakenOnly}
                 />
               </div>
 
               <button
                 className="run-btn"
-                onClick={startRun}
-                disabled={running || !selectedSample || !taxon.trim()}
+                onClick={runSelected}
+                disabled={running || Object.keys(checkedKeys).length === 0 || (!krakenOnly && !taxon.trim())}
               >
-                {running ? "Running…" : "▶ Run Kraken ID Parse"}
+                {running
+                  ? `Running… ${queueInfo.total > 1 ? `(${queueInfo.done}/${queueInfo.total})` : ""}`
+                  : `▶ Run selected${Object.keys(checkedKeys).length ? ` (${Object.keys(checkedKeys).length})` : ""}`}
               </button>
-              {!selectedSample && (
-                <div className="note">Select a sample first to enable the run.</div>
+              {Object.keys(checkedKeys).length === 0 && (
+                <div className="note">Check one or more samples on the left to enable the run. (Or use “Run this sample” under any sample.)</div>
+              )}
+              {!krakenOnly && !taxon.trim() && Object.keys(checkedKeys).length > 0 && (
+                <div className="note">Enter a target taxon above (or tick “Kraken only”) to enable the run.</div>
               )}
             </section>
 
-            {/* RIGHT — results */}
+            {/* RIGHT — current run status (per-sample results live inline at left) */}
             <section className="panel">
               <div className="panel-header">
-                <h2>Results</h2>
+                <h2>Current run</h2>
                 {jobId && <span className="muted" style={{ fontSize: 12 }}>job {jobId.slice(0, 8)}</span>}
               </div>
-              {results.length === 0 ? (
-                <div className="empty-msg">
-                  {jobStatus === "succeeded" ? "No output files found." : "Run a sample to see results here."}
+              {activeRun ? (
+                <div className="selection-box">
+                  <div className="sel-title">
+                    {jobStatus === "running" ? "Running" : jobStatus === "succeeded" ? "Done" : jobStatus}
+                    {queueInfo.total > 1 ? ` — ${queueInfo.done}/${queueInfo.total} in batch` : ""}
+                  </div>
+                  <div><span className="sel-name">{activeRun.sample}</span></div>
+                  <div style={{ marginTop: 2 }}>
+                    <span className="muted">Project:</span> <strong>{activeRun.project}</strong>
+                  </div>
+                  {currentStep && <div className="muted" style={{ marginTop: 4 }}>{currentStep}</div>}
+                  <div className="note" style={{ marginTop: 8 }}>
+                    Output files appear inline under each sample on the left (click a sample’s name to expand).
+                  </div>
                 </div>
               ) : (
-                <div className="results-list">
-                  {results.map((f) => {
-                    const base = `./api/jobs/${jobId}/file?path=${encodeURIComponent(f.name)}`;
-                    const displayName = f.label || f.name;
-                    return (
-                      <div key={f.name} className="results-item">
-                        <span className="result-icon">{fileIcon(f.name)}</span>
-                        {f.openable ? (
-                          <a className="result-name result-link" href={`${base}&inline=1`}
-                             target="_blank" rel="noopener noreferrer" title={`Open ${f.name}`}>
-                            {displayName}
-                          </a>
-                        ) : (
-                          <a className="result-name result-link" href={`${base}&inline=0`}
-                             title={`Download ${f.name}`}>
-                            {displayName}
-                          </a>
-                        )}
-                        <span className="result-size">{fmtSize(f.size)}</span>
-                        <a className="result-download" href={`${base}&inline=0`} title={`Download ${f.name}`}>⬇</a>
-                      </div>
-                    );
-                  })}
+                <div className="empty-msg">
+                  No active run. Results for any sample are shown inline under that sample on the left.
                 </div>
               )}
             </section>

@@ -220,6 +220,249 @@ def api_project_samples(name: str):
     return JSONResponse(_list_fastq_pairs(download_dir))
 
 
+# ---------------------------------------------------------------------------
+# Per-sample Kraken results (decoupled from a single job).
+#
+# Results are read straight from <project>/kraken/<sample>/ on disk so any
+# previously-run sample's outputs can be revisited — not just the last job.
+# ---------------------------------------------------------------------------
+def _collect_result_files(run_dir: Path, include_all: bool) -> List[Dict]:
+    """List result files under a kraken run dir, categorized + sorted."""
+    files: List[Dict] = []
+    if not run_dir.is_dir():
+        return files
+    for p in sorted(run_dir.rglob("*")):
+        if not p.is_file() or p.name.endswith(".log"):
+            continue
+        rel = str(p.relative_to(run_dir))
+        category = _result_category(rel)
+        if not include_all and category is None:
+            continue
+        files.append({
+            "name": rel,
+            "path": str(p),
+            "label": _result_label(rel, category),
+            "size": p.stat().st_size,
+            "openable": _can_open_inline(rel),
+            "category": category,
+        })
+    if not include_all:
+        files = _dedupe_primary_results(files)
+
+    def sort_key(f):
+        category = f.get("category")
+        if category in _CATEGORY_ORDER:
+            return (_CATEGORY_ORDER[category], _TIMESTAMP_RE.sub("", f["name"]))
+        return (50, f["name"])
+
+    files.sort(key=sort_key)
+    for f in files:
+        if include_all and f.get("category") is None:
+            f["label"] = f["name"]
+    return files
+
+
+def _sample_run_status(run_dir: Path) -> str:
+    """Status for a sample: 'running' if a live job owns its dir, else 'done'
+    if the dir holds output, else 'none'."""
+    run_dir_str = str(run_dir)
+    for job in job_manager.list_jobs():
+        if job.get("cwd") == run_dir_str and job.get("status") == "running":
+            return "running"
+    try:
+        if run_dir.is_dir() and any(p.is_file() for p in run_dir.rglob("*")):
+            return "done"
+    except PermissionError:
+        pass
+    return "none"
+
+
+@app.get("/api/projects/{name}/samples/{sample}/kraken-results")
+def api_sample_kraken_results(name: str, sample: str, all: int = Query(0)):
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    run_dir = project_dir / "kraken" / sample
+    return JSONResponse({
+        "project": name,
+        "sample": sample,
+        "present": run_dir.is_dir(),
+        "status": _sample_run_status(run_dir),
+        "run_dir": str(run_dir),
+        "files": _collect_result_files(run_dir, bool(all)),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Cross-tool visibility — surface vSNP results for a sample.
+#
+# vSNP GUI and this tool share /srv/kapurlab/projects, so vSNP writes its
+# per-sample alignment + VCF into <project>/step1/<sample>/ inside the same
+# project dir we browse. These endpoints let a user looking at a sample in
+# Kraken ID Parse see (and download) what vSNP produced for it. Read-only.
+# ---------------------------------------------------------------------------
+def _resolve_vsnp_sample_dir(step1_dir: Path, sample: str) -> Optional[Path]:
+    """Resolve a sample name to its vSNP step1 subdirectory.
+
+    Exact match first, then the same prefix fallback vSNP itself uses
+    (e.g. sample ``13-1941-6`` matches dir ``13-1941-6_S4_L001``).
+    """
+    exact = step1_dir / sample
+    if exact.is_dir():
+        return exact
+    try:
+        candidates = sorted(
+            d for d in step1_dir.iterdir()
+            if d.is_dir() and d.name.startswith(f"{sample}_")
+        )
+    except (OSError, PermissionError):
+        return None
+    return candidates[0] if candidates else None
+
+
+def _sample_in_step2_run(run_dir: Path, sample: str) -> bool:
+    """True if the sample appears as a leaf in any group FASTA of a step2 run.
+
+    vSNP step2 writes per-group alignment FASTAs whose headers are the sample
+    VCF leaf names (e.g. ``>hCoV-19-...-EPI_zc.vcf``). Scanning header lines is
+    robust across both the timestamped ``runs/`` layout and the legacy flat
+    layout, and only reads ``>`` lines so it stays cheap.
+    """
+    try:
+        fastas = list(run_dir.rglob("*.fasta"))
+    except (OSError, PermissionError):
+        return False
+    for fa in fastas:
+        try:
+            with fa.open("r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if not line.startswith(">"):
+                        continue
+                    leaf = line[1:].strip()
+                    for suf in ("_zc.vcf.gz", "_zc.vcf"):
+                        if leaf.endswith(suf):
+                            leaf = leaf[: -len(suf)]
+                            break
+                    if leaf == sample or leaf.startswith(f"{sample}_"):
+                        return True
+        except (OSError, PermissionError):
+            continue
+    return False
+
+
+def _find_latest_step2_for_sample(project_dir: Path, sample: str) -> Dict:
+    """Find the most-recent step2 comparison the sample took part in.
+
+    step2 runs accumulate as timestamped folders and each report covers many
+    samples, so rather than dumping every run we surface only the latest one
+    that actually contains this sample. Returns {"present": False} if none.
+    """
+    step2_dir = project_dir / "step2"
+    if not step2_dir.is_dir():
+        return {"present": False}
+    runs_dir = step2_dir / "runs"
+    candidates: List = []
+    if runs_dir.is_dir():
+        # Run ids are timestamped, so reverse-sorted name == newest first.
+        try:
+            candidates = [(d, d.name) for d in sorted(runs_dir.iterdir(), reverse=True) if d.is_dir()]
+        except (OSError, PermissionError):
+            candidates = []
+    else:
+        # Legacy flat layout: groups live directly under step2/.
+        candidates = [(step2_dir, "legacy")]
+    for run_dir, run_id in candidates:
+        if not _sample_in_step2_run(run_dir, sample):
+            continue
+        html = sorted(run_dir.glob("*.html"), key=_safe_mtime)
+        report = html[-1] if html else None
+        started_at = None
+        meta = run_dir / "run_metadata.json"
+        if meta.is_file():
+            try:
+                started_at = json.loads(meta.read_text(encoding="utf-8")).get("started_at")
+            except (json.JSONDecodeError, OSError):
+                pass
+        try:
+            groups = [
+                g.name for g in sorted(run_dir.iterdir())
+                if g.is_dir() and g.name not in ("vcf_source", "runs", "_provenance")
+                and not g.name.startswith(".")
+            ]
+        except (OSError, PermissionError):
+            groups = []
+        return {
+            "present": True,
+            "run_id": run_id,
+            "started_at": started_at,
+            "report_name": report.name if report else None,
+            "report_path": str(report) if report else None,
+            "groups": groups,
+        }
+    return {"present": False}
+
+
+@app.get("/api/projects/{name}/vsnp/samples/{sample}/files")
+def api_vsnp_sample_files(name: str, sample: str):
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    step1_dir = project_dir / "step1"
+    sample_dir = _resolve_vsnp_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
+    files: List[Dict] = []
+    sample_dir_str = ""
+    if sample_dir:
+        base = sample_dir.resolve()
+        sample_dir_str = str(base)
+        for p in sorted(base.rglob("*")):
+            if not p.is_file() or p.name.startswith(".~lock"):
+                continue
+            try:
+                rel = p.relative_to(base).as_posix()
+                st = p.stat()
+            except (OSError, ValueError):
+                continue
+            files.append({
+                "name": p.name,
+                "relpath": rel,
+                "path": str(p),
+                "size": st.st_size,
+                "openable": _can_open_inline(p.name),
+                "type": p.suffix.lstrip(".").lower() or "file",
+            })
+    return JSONResponse({
+        "project": name,
+        "sample": sample,
+        "step1_present": bool(sample_dir),
+        "step1_dir": sample_dir_str,
+        "files": files,
+        "step2": _find_latest_step2_for_sample(project_dir, sample),
+    })
+
+
+@app.get("/api/projects/{name}/file")
+def api_project_file(name: str, path: str = Query(...), inline: int = 0):
+    """Serve a file from anywhere inside a project dir (cross-tool downloads).
+
+    Used to download/open vSNP outputs surfaced in the results panel. The
+    path-traversal guard keeps `target` inside the resolved project dir.
+    """
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    root = project_dir.resolve()
+    target = Path(path).resolve()
+    if root != target and root not in target.parents:
+        raise HTTPException(403, "Path outside project directory")
+    if not target.is_file():
+        raise HTTPException(404, f"File not found: {path}")
+    media_type = _media_type_for(target.name)
+    want_inline = bool(inline) and _can_open_inline(target.name)
+    disposition = "inline" if want_inline else "attachment"
+    headers = {"Content-Disposition": f'{disposition}; filename="{target.name}"'}
+    return FileResponse(target, media_type=media_type, headers=headers)
+
+
 @app.get("/api/config")
 def api_get_config():
     return JSONResponse(load_config())
@@ -245,9 +488,10 @@ class RunPayload(BaseModel):
     project: str
     r1: str           # absolute path to R1 FASTQ
     r2: Optional[str] = None
-    taxon: str
+    taxon: Optional[str] = None
     kraken_db: Optional[str] = None
     blast_db: Optional[str] = None
+    kraken_only: bool = False   # run only Kraken2 + Krona graph; skip parsing/assembly/BLAST
 
 
 @app.post("/api/run")
@@ -255,6 +499,14 @@ def api_run(payload: RunPayload):
     cfg = load_config()
     kraken_db = payload.kraken_db or cfg.get("kraken_db", "")
     blast_db = payload.blast_db or cfg.get("blast_db", "nt")
+    taxon = (payload.taxon or "").strip()
+
+    # Taxon drives the read-parsing/assembly/BLAST identification, which
+    # kraken-only mode skips — so it's only required for a full run.
+    if not payload.kraken_only and not taxon:
+        raise HTTPException(400, "A target taxon is required for a full run.")
+    if payload.kraken_only and not kraken_db:
+        raise HTTPException(400, "Kraken-only mode requires a Kraken DB path.")
 
     # Validate paths
     r1 = Path(payload.r1)
@@ -298,10 +550,13 @@ def api_run(payload: RunPayload):
             command.extend(["-r2", str(r2)])
         else:
             raise HTTPException(400, f"R2 file not found: {payload.r2}")
-    command.extend(["-t", payload.taxon])
+    if taxon:
+        command.extend(["-t", taxon])
     if kraken_db:
         command.extend(["-k", kraken_db])
-    if blast_db:
+    if payload.kraken_only:
+        command.append("--kraken-only")
+    elif blast_db:
         command.extend(["-b", blast_db])
 
     env = {
@@ -310,7 +565,8 @@ def api_run(payload: RunPayload):
         "PYTHONUNBUFFERED": "1",  # belt-and-suspenders with `python -u`
     }
 
-    job_name = f"{payload.project}/{sample_name} — {payload.taxon}"
+    job_label = "Kraken-only (Krona)" if payload.kraken_only else (taxon or "run")
+    job_name = f"{payload.project}/{sample_name} — {job_label}"
     job_id = job_manager.start_job(name=job_name, command=command, cwd=run_dir, env=env)
     return JSONResponse({"job_id": job_id, "run_dir": str(run_dir)})
 

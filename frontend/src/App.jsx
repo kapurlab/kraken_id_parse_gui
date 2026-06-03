@@ -167,6 +167,22 @@ export default function App() {
     }
   }, [logLines]);
 
+  // Keep the Inputs pane pointed at a real project: default to the first one
+  // and recover if the current target disappears (e.g. after a refresh). This
+  // means the import/upload/download controls are always available as long as
+  // at least one project exists — no need to hunt for "the active project".
+  useEffect(() => {
+    if (!projects.length) {
+      if (activeProject) setActiveProject("");
+      return;
+    }
+    if (!activeProject || !projects.find((p) => p.name === activeProject)) {
+      const first = projects[0].name;
+      setActiveProject(first);
+      if (inputsByProj[first] === undefined) loadInputs(first);
+    }
+  }, [projects]);
+
   function fetchSamples(name) {
     return fetch(`./api/projects/${encodeURIComponent(name)}/samples`)
       .then((r) => r.json())
@@ -848,16 +864,22 @@ export default function App() {
               <section className="panel">
                 <div className="panel-header">
                   <h2>Inputs</h2>
-                  {activeProject && (
-                    <span className="muted" style={{ fontSize: 12 }}>
-                      {activeProject}
-                      {inputsByProj[activeProject]?.count > 0 ? ` · ${inputsByProj[activeProject].count} in download/` : ""}
-                    </span>
+                  {projects.length > 0 && (
+                    <select
+                      value={activeProject}
+                      onChange={(e) => selectProject(e.target.value)}
+                      title="Project to add FASTQ files to"
+                      style={{ width: "auto", maxWidth: "60%", padding: "6px 10px" }}
+                    >
+                      {projects.map((p) => (
+                        <option key={p.name} value={p.name}>{p.name}</option>
+                      ))}
+                    </select>
                   )}
                 </div>
                 {!activeProject ? (
                   <div className="empty-msg">
-                    Select a project on the left to import, upload, or download FASTQ files into it.
+                    Create a project first (top of the Projects panel), then import, upload, or download FASTQ files into it.
                   </div>
                 ) : (
                   <>

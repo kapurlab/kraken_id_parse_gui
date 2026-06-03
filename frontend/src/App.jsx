@@ -40,6 +40,15 @@ export default function App() {
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
+  // Sample-loading state, keyed by project name so multiple expanded projects
+  // don't clobber each other.
+  const [showAdd, setShowAdd] = useState({});       // proj -> bool (Add samples open)
+  const [addPath, setAddPath] = useState({});       // proj -> import path string
+  const [sraText, setSraText] = useState({});       // proj -> SRA accessions string
+  const [addStatus, setAddStatus] = useState({});   // proj -> status message
+  const [inputsByProj, setInputsByProj] = useState({}); // proj -> {files,count,total_bytes}
+  const uploadProjRef = useRef("");                 // which project the file dialog targets
+  const uploadInputRef = useRef(null);
   const [expanded, setExpanded] = useState({});          // project name → bool
   const [samples, setSamples] = useState({});            // project name → [sample]
   const [checkedKeys, setCheckedKeys] = useState({});    // key → {project, ...sample}  (batch selection)
@@ -131,8 +140,15 @@ export default function App() {
       const created = await res.json().catch(() => ({}));
       setNewProjectName("");
       loadProjects();
-      // Auto-expand the new project so the user can drop FASTQs / run right away.
-      if (created.name) setExpanded((e) => ({ ...e, [created.name]: true }));
+      // Auto-expand the new project and open the Add-samples panel so the user
+      // can import / drop / download reads right away. Fetch its (empty)
+      // sample + input lists so the row doesn't hang on "Loading samples…".
+      if (created.name) {
+        const n = created.name;
+        setExpanded((e) => ({ ...e, [n]: true }));
+        setShowAdd((m) => ({ ...m, [n]: true }));
+        await Promise.all([fetchSamples(n), loadInputs(n)]);
+      }
     } finally {
       setCreatingProject(false);
     }
@@ -151,14 +167,118 @@ export default function App() {
     }
   }, [logLines]);
 
+  function fetchSamples(name) {
+    return fetch(`./api/projects/${encodeURIComponent(name)}/samples`)
+      .then((r) => r.json())
+      .then((data) => setSamples((s) => ({ ...s, [name]: data })))
+      .catch(() => setSamples((s) => ({ ...s, [name]: [] })));
+  }
+
   function toggleProject(name) {
     const isExpanded = expanded[name];
     setExpanded((e) => ({ ...e, [name]: !isExpanded }));
-    if (!isExpanded && !samples[name]) {
-      fetch(`./api/projects/${encodeURIComponent(name)}/samples`)
-        .then((r) => r.json())
-        .then((data) => setSamples((s) => ({ ...s, [name]: data })))
-        .catch(() => setSamples((s) => ({ ...s, [name]: [] })));
+    if (!isExpanded) {
+      if (!samples[name]) fetchSamples(name);
+      loadInputs(name);
+    }
+  }
+
+  // ---- Sample loading (import / upload / SRA) -------------------------------
+  function loadInputs(name) {
+    return fetch(`./api/projects/${encodeURIComponent(name)}/inputs`)
+      .then((r) => r.json())
+      .then((data) => setInputsByProj((m) => ({ ...m, [name]: data })))
+      .catch(() => setInputsByProj((m) => ({ ...m, [name]: { files: [], count: 0, total_bytes: 0 } })));
+  }
+
+  const setStat = (name, msg) => setAddStatus((m) => ({ ...m, [name]: msg }));
+
+  async function refreshAfterLoad(name) {
+    await Promise.all([fetchSamples(name), loadInputs(name)]);
+    loadProjects();
+  }
+
+  async function linkLocal(name) {
+    const path = (addPath[name] || "").trim();
+    if (!path) return;
+    setStat(name, "Linking…");
+    try {
+      const res = await fetch(`./api/projects/${encodeURIComponent(name)}/link-local`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setStat(name, `Import failed: ${data.detail || res.status}`); return; }
+      setStat(name, `Linked ${data.linked} file${data.linked === 1 ? "" : "s"}.`);
+      setAddPath((m) => ({ ...m, [name]: "" }));
+      await refreshAfterLoad(name);
+    } catch (e) {
+      setStat(name, `Import failed: ${e.message}`);
+    }
+  }
+
+  function pickFiles(name) {
+    uploadProjRef.current = name;
+    uploadInputRef.current?.click();
+  }
+
+  async function uploadFiles(name, fileList) {
+    const files = Array.from(fileList || []).filter((f) => f.name.endsWith(".fastq.gz"));
+    if (!name || !files.length) return;
+    const fd = new FormData();
+    files.forEach((f) => fd.append("files", f));
+    setStat(name, `Uploading ${files.length} file${files.length === 1 ? "" : "s"}…`);
+    try {
+      const res = await fetch(`./api/projects/${encodeURIComponent(name)}/upload`, { method: "POST", body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setStat(name, `Upload failed: ${data.detail || res.status}`); return; }
+      setStat(name, `Uploaded ${data.uploaded} file${data.uploaded === 1 ? "" : "s"}.`);
+      await refreshAfterLoad(name);
+    } catch (e) {
+      setStat(name, `Upload failed: ${e.message}`);
+    }
+  }
+
+  function parseAccessions(text) {
+    return (text || "").split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  }
+
+  async function sraDownload(name) {
+    const accessions = parseAccessions(sraText[name]);
+    if (!accessions.length) return;
+    setStat(name, `Resolving ${accessions.length} accession${accessions.length === 1 ? "" : "s"}…`);
+    setShowLogs(true);
+    try {
+      const res = await fetch(`./api/projects/${encodeURIComponent(name)}/sra/download`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accessions }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setStat(name, `Download failed: ${data.detail || res.status}`); return; }
+      setStat(name, "Downloading… progress shows in the Pipeline Log below.");
+      setSraText((m) => ({ ...m, [name]: "" }));
+      // Stream the download log into the shared log panel; refresh when done.
+      setJobId(data.job_id);
+      setJobStatus("running");
+      setLogLines([]);
+      streamLogUntilDone(data.job_id, null, () => {
+        setStat(name, "Download finished — see samples below.");
+        refreshAfterLoad(name);
+      });
+    } catch (e) {
+      setStat(name, `Download failed: ${e.message}`);
+    }
+  }
+
+  async function deleteInput(name, filename) {
+    if (!window.confirm(`Remove ${filename} from this project's download/ folder?`)) return;
+    try {
+      await fetch(`./api/projects/${encodeURIComponent(name)}/inputs/${encodeURIComponent(filename)}`, { method: "DELETE" });
+      await refreshAfterLoad(name);
+    } catch (e) {
+      setStat(name, `Delete failed: ${e.message}`);
     }
   }
 
@@ -337,6 +457,20 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* Single hidden file input shared by every project's "Choose files".
+          uploadProjRef tracks which project the dialog was opened for. */}
+      <input
+        ref={uploadInputRef}
+        type="file"
+        multiple
+        accept=".fastq.gz,application/gzip"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const files = Array.from(e.target.files);
+          e.target.value = "";
+          if (uploadProjRef.current) uploadFiles(uploadProjRef.current, files);
+        }}
+      />
       {/* ── Header ─────────────────────────────────────────────── */}
       <header className="app-header">
         <div className="app-brand">
@@ -507,9 +641,84 @@ export default function App() {
                     </div>
                     {expanded[proj.name] && (
                       <div className="sample-list">
+                        {/* ── Add samples: import / drag-drop / SRA download ── */}
+                        <div className="add-samples">
+                          <div className="add-samples-head" onClick={() => setShowAdd((m) => ({ ...m, [proj.name]: !m[proj.name] }))}>
+                            <span className="expand-icon">{showAdd[proj.name] ? "▾" : "▸"}</span>
+                            <span style={{ fontWeight: 700, fontSize: 12, flex: 1 }}>＋ Add samples</span>
+                            {inputsByProj[proj.name]?.count > 0 && (
+                              <span className="muted" style={{ fontSize: 11 }}>{inputsByProj[proj.name].count} in download/</span>
+                            )}
+                          </div>
+                          {showAdd[proj.name] && (
+                            <div className="add-samples-body">
+                              {/* Import from a server path */}
+                              <div className="add-block">
+                                <label className="form-label">Import from a server path</label>
+                                <div className="row" style={{ margin: 0 }}>
+                                  <input
+                                    placeholder="/srv/kapurlab/… folder or .fastq.gz file"
+                                    value={addPath[proj.name] || ""}
+                                    onChange={(e) => setAddPath((m) => ({ ...m, [proj.name]: e.target.value }))}
+                                    onKeyDown={(e) => { if (e.key === "Enter") linkLocal(proj.name); }}
+                                  />
+                                  <button className="ghost action" onClick={() => linkLocal(proj.name)} disabled={!(addPath[proj.name] || "").trim()}>Link</button>
+                                </div>
+                                <div className="form-hint">Symlinks every .fastq.gz found — no copying.</div>
+                              </div>
+
+                              {/* Drag & drop / choose files */}
+                              <div className="add-block">
+                                <label className="form-label">Upload / drag &amp; drop</label>
+                                <div
+                                  className="dropzone"
+                                  onDragOver={(e) => e.preventDefault()}
+                                  onDrop={(e) => { e.preventDefault(); uploadFiles(proj.name, e.dataTransfer.files); }}
+                                >
+                                  <button type="button" className="ghost action" onClick={() => pickFiles(proj.name)}>Choose files</button>
+                                  <span className="muted" style={{ fontSize: 12 }}>or drop .fastq.gz here</span>
+                                </div>
+                              </div>
+
+                              {/* SRA download */}
+                              <div className="add-block">
+                                <label className="form-label">Download from SRA / ENA</label>
+                                <div className="row" style={{ margin: 0 }}>
+                                  <input
+                                    placeholder="SRR/ERR/DRR or SRX/SRS/PRJNA (space or comma separated)"
+                                    value={sraText[proj.name] || ""}
+                                    onChange={(e) => setSraText((m) => ({ ...m, [proj.name]: e.target.value }))}
+                                    onKeyDown={(e) => { if (e.key === "Enter") sraDownload(proj.name); }}
+                                  />
+                                  <button className="ghost action" onClick={() => sraDownload(proj.name)} disabled={!parseAccessions(sraText[proj.name]).length || running}>Download</button>
+                                </div>
+                                <div className="form-hint">Runs in the background; progress appears in the Pipeline Log.</div>
+                              </div>
+
+                              {addStatus[proj.name] && <div className="note" style={{ marginTop: 4 }}>{addStatus[proj.name]}</div>}
+
+                              {/* Files already in download/ */}
+                              {inputsByProj[proj.name]?.files?.length > 0 && (
+                                <div className="add-block">
+                                  <label className="form-label">Files in download/ ({inputsByProj[proj.name].count}, {fmtSize(inputsByProj[proj.name].total_bytes)})</label>
+                                  <div className="input-files">
+                                    {inputsByProj[proj.name].files.map((f) => (
+                                      <div key={f.name} className="input-file-row">
+                                        <span className="file-name" title={f.name} style={{ flex: 1 }}>{f.name}</span>
+                                        <span className="file-size">{fmtSize(f.size)}</span>
+                                        <button className="ghost" style={{ fontSize: 11, padding: "2px 7px" }} title="Remove from download/" onClick={() => deleteInput(proj.name, f.name)}>✕</button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
                         {!samples[proj.name] && <div className="loading-text">Loading samples…</div>}
                         {samples[proj.name]?.length === 0 && (
-                          <div className="empty-msg" style={{ paddingLeft: 4 }}>No FASTQ files in download/</div>
+                          <div className="empty-msg" style={{ paddingLeft: 4 }}>No FASTQ files yet — add some above.</div>
                         )}
                         {samples[proj.name]?.map((s) => {
                           const key = sampleKey(proj.name, s);

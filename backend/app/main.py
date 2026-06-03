@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiofiles
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +33,12 @@ from pydantic import BaseModel
 
 from .config import load_config, save_config
 from .jobs import JobManager
+from .sra import (
+    SRAExpansionError,
+    build_download_script,
+    expand_accessions_with_mapping,
+    write_crosswalk_tsv,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -311,6 +317,157 @@ def api_create_project(payload: ProjectCreate):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return JSONResponse({"name": project_dir.name, "path": str(project_dir), "scope": scope})
+
+
+# ---------------------------------------------------------------------------
+# Loading samples into a project — import (link), upload (drag & drop), and
+# SRA download. Mirrors vSNP GUI so a project can be populated from within
+# either tool. All three land FASTQs in <project>/download/, which the sample
+# browser and the run endpoints already read.
+# ---------------------------------------------------------------------------
+def _writable_project_dir(name: str) -> Path:
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    (project_dir / "download").mkdir(parents=True, exist_ok=True)
+    return project_dir
+
+
+@app.get("/api/projects/{name}/inputs")
+def api_project_inputs(name: str):
+    """List files currently in <project>/download/ (name + size + mtime)."""
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    download_dir = project_dir / "download"
+    files: List[Dict] = []
+    total = 0
+    if download_dir.is_dir():
+        for p in sorted(download_dir.iterdir()):
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            files.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
+            total += st.st_size
+    return JSONResponse({"files": files, "total_bytes": total, "count": len(files)})
+
+
+@app.delete("/api/projects/{name}/inputs/{filename}")
+def api_project_input_delete(name: str, filename: str):
+    if not filename or "/" in filename or "\\" in filename or filename.startswith(".") or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    target = project_dir / "download" / filename
+    if not target.is_file() and not target.is_symlink():
+        raise HTTPException(404, f"File not found: {filename}")
+    target.unlink()
+    return JSONResponse({"deleted": filename})
+
+
+@app.post("/api/projects/{name}/upload")
+async def api_project_upload(name: str, files: List[UploadFile] = File(...)):
+    """Save drag-and-dropped / chosen FASTQ files into <project>/download/."""
+    project_dir = _writable_project_dir(name)
+    download_dir = project_dir / "download"
+    saved = 0
+    for f in files:
+        if not f.filename:
+            continue
+        target = download_dir / Path(f.filename).name
+        async with aiofiles.open(target, "wb") as out:
+            while True:
+                chunk = await f.read(1024 * 1024)
+                if not chunk:
+                    break
+                await out.write(chunk)
+        saved += 1
+    return JSONResponse({"uploaded": saved})
+
+
+class LinkLocalRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/projects/{name}/link-local")
+def api_project_link_local(name: str, payload: LinkLocalRequest):
+    """Symlink every *.fastq.gz under a server-side directory into download/.
+
+    Lets users 'import' reads that already live on the shared filesystem
+    without copying gigabytes around.
+    """
+    project_dir = _writable_project_dir(name)
+    src = Path((payload.path or "").strip()).expanduser()
+    if not src.exists():
+        raise HTTPException(400, f"Input path not found: {src}")
+    download_dir = project_dir / "download"
+    # Accept either a directory of fastqs or a single fastq file.
+    candidates = [src] if src.is_file() else sorted(src.glob("*.fastq.gz"))
+    count = 0
+    for f in candidates:
+        if not f.name.endswith(".fastq.gz"):
+            continue
+        target = download_dir / f.name
+        if not target.exists():
+            target.symlink_to(f.resolve())
+            count += 1
+    return JSONResponse({"linked": count})
+
+
+class SraRequest(BaseModel):
+    accessions: List[str]
+    folder: Optional[str] = None
+
+
+@app.post("/api/projects/{name}/sra/download")
+def api_project_sra_download(name: str, payload: SraRequest):
+    """Resolve SRA accessions and kick off a background download into
+    download/. Uses curl/ENA + (if present) fasterq-dump — the script skips
+    whatever tool isn't installed, so it works with just curl/wget."""
+    project_dir = _writable_project_dir(name)
+    try:
+        expanded, mapping = expand_accessions_with_mapping(payload.accessions, strict=True)
+    except SRAExpansionError as e:
+        raise HTTPException(
+            502,
+            f"Could not resolve SRA accessions via NCBI eutils: {e}. "
+            "This is usually NCBI rate-limiting; wait ~30 s and retry.",
+        )
+    download_root = project_dir / "download"
+    if payload.folder:
+        download_root = download_root / Path(payload.folder).name
+    download_root.mkdir(parents=True, exist_ok=True)
+    try:
+        write_crosswalk_tsv(download_root, mapping)
+    except OSError as e:
+        logger.warning("Failed to write sra_crosswalk.tsv: %s", e)
+    script = build_download_script(download_root, expanded, allow_insecure_https=False)
+    script_path = download_root / "download_sra.sh"
+    script_path.write_text(script, encoding="utf-8")
+    script_path.chmod(0o755)
+    env = {"PATH": os.environ.get("PATH", "")}
+    job_id = job_manager.start_job(
+        name=f"sra_download — {name}",
+        command=["bash", str(script_path)],
+        cwd=download_root,
+        env=env,
+    )
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/api/projects/{name}/sra-crosswalk")
+def api_project_sra_crosswalk(name: str):
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    crosswalk = project_dir / "download" / "sra_crosswalk.tsv"
+    if not crosswalk.is_file():
+        raise HTTPException(404, "No SRA crosswalk for this project")
+    return FileResponse(crosswalk, media_type="text/plain")
 
 
 @app.get("/api/projects/{name}/samples")

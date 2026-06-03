@@ -127,6 +127,93 @@ def _get_project_dir(name: str) -> Optional[Path]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Project creation.
+#
+# A project created here uses the SAME on-disk skeleton vSNP GUI creates, so a
+# project made in Kraken ID Parse is immediately usable in vSNP (and vice
+# versa) — both tools share /srv/kapurlab/projects and per-user ~/projects and
+# list whatever is on disk. We add the kraken/ subdir up front so the sample
+# browser and results endpoints have a stable layout.
+# ---------------------------------------------------------------------------
+_PROJECT_NAME_OK_CHARSET = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _normalize_project_name(name: str) -> str:
+    """Filesystem-safe project dir name. Mirrors vsnp_gui's rules so a name
+    accepted in one tool is accepted in the other: spaces auto-convert to
+    underscores (downstream CLIs don't quote paths), other unsafe chars are
+    rejected with a clear message."""
+    if not isinstance(name, str):
+        raise ValueError("Project name must be a string")
+    cleaned = re.sub(r"\s+", "_", name.strip())
+    if not cleaned:
+        raise ValueError("Project name is empty")
+    if cleaned.startswith("."):
+        raise ValueError("Project name cannot start with '.'")
+    if len(cleaned) > 100:
+        raise ValueError("Project name too long (max 100 characters)")
+    if not _PROJECT_NAME_OK_CHARSET.match(cleaned):
+        bad = sorted(set(ch for ch in cleaned if not re.match(r"[A-Za-z0-9._-]", ch)))
+        raise ValueError(
+            f"Project name contains unsupported characters: {''.join(bad)!r}. "
+            "Only letters, digits, _ - . are allowed (spaces become underscores)."
+        )
+    return cleaned
+
+
+def _ensure_project_dirs(project_dir: Path) -> None:
+    (project_dir / "download").mkdir(parents=True, exist_ok=True)
+    (project_dir / "kraken").mkdir(parents=True, exist_ok=True)
+    # vSNP-compatible layout so the project is shared cleanly between tools.
+    (project_dir / "step1").mkdir(parents=True, exist_ok=True)
+    (project_dir / "step2" / "vcf_source").mkdir(parents=True, exist_ok=True)
+    (project_dir / f"{project_dir.name}_VCFs").mkdir(parents=True, exist_ok=True)
+
+
+def _create_project(name: str, scope: str) -> Path:
+    """Create a project under the requested scope ('personal' or 'shared').
+
+    Personal projects land under the user's configured projects_root (defaults
+    to ~/projects). Shared projects land under /srv/kapurlab/projects, which is
+    only writable where the lab has granted it — a PermissionError there is
+    surfaced as a clear 400 rather than a stack trace.
+    """
+    name = _normalize_project_name(name)
+    cfg = load_config()
+    if scope == _SCOPE_SHARED:
+        root = _SHARED_PROJECTS
+    else:
+        root = Path(cfg.get("projects_root", "") or (Path.home() / "projects"))
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"Cannot create projects root {root}: {exc}")
+    project_dir = root / name
+    if project_dir.exists():
+        raise ValueError(f"Project already exists: {name}")
+    try:
+        _ensure_project_dirs(project_dir)
+    except PermissionError:
+        raise ValueError(
+            f"No permission to create a project under {root}. "
+            "Shared projects require lab write access; create it as a personal "
+            "project instead."
+        )
+    meta = {"name": name, "created_at": _now_iso(), "status": "created"}
+    try:
+        with open(project_dir / "project.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
+    except OSError:
+        pass
+    return project_dir
+
+
+def _now_iso() -> str:
+    from datetime import datetime
+    return datetime.now().isoformat(timespec="seconds")
+
+
 # Matches _R1/_R2 (with optional _001 etc.) or _1/_2 immediately before .fastq.gz
 _READ_TAG_RE = re.compile(r'(?:_R([12])(?:_\d+)?|_([12]))\.fastq\.gz$', re.IGNORECASE)
 
@@ -207,6 +294,23 @@ def api_list_projects():
         seen = {p["name"] for p in projects}
         projects += [p for p in personal if p["name"] not in seen]
     return JSONResponse(projects)
+
+
+class ProjectCreate(BaseModel):
+    name: str
+    scope: Optional[str] = None   # "personal" (default) | "shared"
+
+
+@app.post("/api/projects")
+def api_create_project(payload: ProjectCreate):
+    scope = (payload.scope or _SCOPE_PERSONAL).strip() or _SCOPE_PERSONAL
+    if scope not in (_SCOPE_PERSONAL, _SCOPE_SHARED):
+        raise HTTPException(400, f"Invalid scope: {scope!r}")
+    try:
+        project_dir = _create_project(payload.name, scope)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return JSONResponse({"name": project_dir.name, "path": str(project_dir), "scope": scope})
 
 
 @app.get("/api/projects/{name}/samples")

@@ -38,6 +38,8 @@ function fmtSize(bytes) {
 export default function App() {
   const [projects, setProjects] = useState([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
   const [expanded, setExpanded] = useState({});          // project name → bool
   const [samples, setSamples] = useState({});            // project name → [sample]
   const [checkedKeys, setCheckedKeys] = useState({});    // key → {project, ...sample}  (batch selection)
@@ -107,6 +109,33 @@ export default function App() {
         setProjectsLoading(false);
       })
       .catch(() => setProjectsLoading(false));
+  }
+
+  // Create a new project (personal root by default). Projects share the same
+  // on-disk layout vSNP uses, so a project made here also shows up in vSNP GUI.
+  async function createProject() {
+    const name = newProjectName.trim();
+    if (!name || creatingProject) return;
+    setCreatingProject(true);
+    try {
+      const res = await fetch("./api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        window.alert(`Could not create project: ${detail.detail || res.status}`);
+        return;
+      }
+      const created = await res.json().catch(() => ({}));
+      setNewProjectName("");
+      loadProjects();
+      // Auto-expand the new project so the user can drop FASTQs / run right away.
+      if (created.name) setExpanded((e) => ({ ...e, [created.name]: true }));
+    } finally {
+      setCreatingProject(false);
+    }
   }
 
   // Auto-scroll to the bottom on new lines, but only if the user is already
@@ -438,6 +467,22 @@ export default function App() {
                 <div className="panel-actions">
                   <button className="ghost action" onClick={loadProjects}>↻ Refresh</button>
                 </div>
+              </div>
+              <div className="row">
+                <input
+                  placeholder="New project name (e.g. LSDV_India)"
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value.replace(/\s+/g, "_"))}
+                  onKeyDown={(e) => { if (e.key === "Enter") createProject(); }}
+                  disabled={creatingProject}
+                  title="Spaces become underscores. Letters, digits, _ - . are allowed. Created under your personal projects and visible in vSNP too."
+                />
+                <button onClick={createProject} disabled={creatingProject || !newProjectName.trim()}>
+                  {creatingProject ? "Creating…" : "Create"}
+                </button>
+              </div>
+              <div className="form-hint" style={{ marginTop: -4, marginBottom: 8 }}>
+                Created under your personal projects root — also visible in vSNP GUI. Add FASTQs to the project’s <code>download/</code> folder.
               </div>
               <div className="list project-list">
                 {projectsLoading && <div className="loading-text">Loading projects…</div>}

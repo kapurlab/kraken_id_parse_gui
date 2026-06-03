@@ -892,16 +892,23 @@ export default function App() {
                     {/* SRA download */}
                     <div className="form-section">
                       <label className="form-label">Download from SRA / ENA</label>
-                      <div className="row" style={{ margin: 0 }}>
-                        <input
-                          placeholder="SRR/ERR/DRR or SRX/SRS/PRJNA (space or comma separated)"
-                          value={sraText[activeProject] || ""}
-                          onChange={(e) => setSraText((m) => ({ ...m, [activeProject]: e.target.value }))}
-                          onKeyDown={(e) => { if (e.key === "Enter") sraDownload(activeProject); }}
-                        />
-                        <button className="ghost action" onClick={() => sraDownload(activeProject)} disabled={!parseAccessions(sraText[activeProject]).length || running}>Download</button>
+                      <textarea
+                        rows={5}
+                        placeholder={"SRR/ERR/DRR or SRX/SRS/PRJNA accessions\n(one per line)"}
+                        value={sraText[activeProject] || ""}
+                        onChange={(e) => setSraText((m) => ({ ...m, [activeProject]: e.target.value }))}
+                        style={{ resize: "vertical", fontFamily: "inherit" }}
+                      />
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                        <button
+                          className="ghost action"
+                          onClick={() => sraDownload(activeProject)}
+                          disabled={!parseAccessions(sraText[activeProject]).length || running}
+                        >
+                          Download{parseAccessions(sraText[activeProject]).length ? ` (${parseAccessions(sraText[activeProject]).length})` : ""}
+                        </button>
+                        <span className="form-hint" style={{ marginTop: 0 }}>Runs in the background; progress appears in the Pipeline Log.</span>
                       </div>
-                      <div className="form-hint">Runs in the background; progress appears in the Pipeline Log.</div>
                     </div>
 
                     {addStatus[activeProject] && <div className="note">{addStatus[activeProject]}</div>}

@@ -42,7 +42,7 @@ export default function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   // Sample-loading state, keyed by project name so multiple expanded projects
   // don't clobber each other.
-  const [showAdd, setShowAdd] = useState({});       // proj -> bool (Add samples open)
+  const [activeProject, setActiveProject] = useState(""); // project the Inputs pane targets
   const [addPath, setAddPath] = useState({});       // proj -> import path string
   const [sraText, setSraText] = useState({});       // proj -> SRA accessions string
   const [addStatus, setAddStatus] = useState({});   // proj -> status message
@@ -146,7 +146,7 @@ export default function App() {
       if (created.name) {
         const n = created.name;
         setExpanded((e) => ({ ...e, [n]: true }));
-        setShowAdd((m) => ({ ...m, [n]: true }));
+        setActiveProject(n);
         await Promise.all([fetchSamples(n), loadInputs(n)]);
       }
     } finally {
@@ -177,10 +177,18 @@ export default function App() {
   function toggleProject(name) {
     const isExpanded = expanded[name];
     setExpanded((e) => ({ ...e, [name]: !isExpanded }));
+    // Target this project for the Inputs pane whenever the user opens it.
+    setActiveProject(name);
     if (!isExpanded) {
       if (!samples[name]) fetchSamples(name);
       loadInputs(name);
     }
+  }
+
+  // Make a project the Inputs-pane target without toggling its expansion.
+  function selectProject(name) {
+    setActiveProject(name);
+    if (inputsByProj[name] === undefined) loadInputs(name);
   }
 
   // ---- Sample loading (import / upload / SRA) -------------------------------
@@ -626,7 +634,7 @@ export default function App() {
                 {projects.map((proj) => (
                   <div
                     key={proj.name}
-                    className={`list-item ${activeRun?.project === proj.name ? "active" : ""}`}
+                    className={`list-item ${activeRun?.project === proj.name || activeProject === proj.name ? "active" : ""}`}
                   >
                     <div className="item-top" onClick={() => toggleProject(proj.name)}>
                       <span className="expand-icon">{expanded[proj.name] ? "▾" : "▸"}</span>
@@ -641,84 +649,11 @@ export default function App() {
                     </div>
                     {expanded[proj.name] && (
                       <div className="sample-list">
-                        {/* ── Add samples: import / drag-drop / SRA download ── */}
-                        <div className="add-samples">
-                          <div className="add-samples-head" onClick={() => setShowAdd((m) => ({ ...m, [proj.name]: !m[proj.name] }))}>
-                            <span className="expand-icon">{showAdd[proj.name] ? "▾" : "▸"}</span>
-                            <span style={{ fontWeight: 700, fontSize: 12, flex: 1 }}>＋ Add samples</span>
-                            {inputsByProj[proj.name]?.count > 0 && (
-                              <span className="muted" style={{ fontSize: 11 }}>{inputsByProj[proj.name].count} in download/</span>
-                            )}
-                          </div>
-                          {showAdd[proj.name] && (
-                            <div className="add-samples-body">
-                              {/* Import from a server path */}
-                              <div className="add-block">
-                                <label className="form-label">Import from a server path</label>
-                                <div className="row" style={{ margin: 0 }}>
-                                  <input
-                                    placeholder="/srv/kapurlab/… folder or .fastq.gz file"
-                                    value={addPath[proj.name] || ""}
-                                    onChange={(e) => setAddPath((m) => ({ ...m, [proj.name]: e.target.value }))}
-                                    onKeyDown={(e) => { if (e.key === "Enter") linkLocal(proj.name); }}
-                                  />
-                                  <button className="ghost action" onClick={() => linkLocal(proj.name)} disabled={!(addPath[proj.name] || "").trim()}>Link</button>
-                                </div>
-                                <div className="form-hint">Symlinks every .fastq.gz found — no copying.</div>
-                              </div>
-
-                              {/* Drag & drop / choose files */}
-                              <div className="add-block">
-                                <label className="form-label">Upload / drag &amp; drop</label>
-                                <div
-                                  className="dropzone"
-                                  onDragOver={(e) => e.preventDefault()}
-                                  onDrop={(e) => { e.preventDefault(); uploadFiles(proj.name, e.dataTransfer.files); }}
-                                >
-                                  <button type="button" className="ghost action" onClick={() => pickFiles(proj.name)}>Choose files</button>
-                                  <span className="muted" style={{ fontSize: 12 }}>or drop .fastq.gz here</span>
-                                </div>
-                              </div>
-
-                              {/* SRA download */}
-                              <div className="add-block">
-                                <label className="form-label">Download from SRA / ENA</label>
-                                <div className="row" style={{ margin: 0 }}>
-                                  <input
-                                    placeholder="SRR/ERR/DRR or SRX/SRS/PRJNA (space or comma separated)"
-                                    value={sraText[proj.name] || ""}
-                                    onChange={(e) => setSraText((m) => ({ ...m, [proj.name]: e.target.value }))}
-                                    onKeyDown={(e) => { if (e.key === "Enter") sraDownload(proj.name); }}
-                                  />
-                                  <button className="ghost action" onClick={() => sraDownload(proj.name)} disabled={!parseAccessions(sraText[proj.name]).length || running}>Download</button>
-                                </div>
-                                <div className="form-hint">Runs in the background; progress appears in the Pipeline Log.</div>
-                              </div>
-
-                              {addStatus[proj.name] && <div className="note" style={{ marginTop: 4 }}>{addStatus[proj.name]}</div>}
-
-                              {/* Files already in download/ */}
-                              {inputsByProj[proj.name]?.files?.length > 0 && (
-                                <div className="add-block">
-                                  <label className="form-label">Files in download/ ({inputsByProj[proj.name].count}, {fmtSize(inputsByProj[proj.name].total_bytes)})</label>
-                                  <div className="input-files">
-                                    {inputsByProj[proj.name].files.map((f) => (
-                                      <div key={f.name} className="input-file-row">
-                                        <span className="file-name" title={f.name} style={{ flex: 1 }}>{f.name}</span>
-                                        <span className="file-size">{fmtSize(f.size)}</span>
-                                        <button className="ghost" style={{ fontSize: 11, padding: "2px 7px" }} title="Remove from download/" onClick={() => deleteInput(proj.name, f.name)}>✕</button>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-
                         {!samples[proj.name] && <div className="loading-text">Loading samples…</div>}
                         {samples[proj.name]?.length === 0 && (
-                          <div className="empty-msg" style={{ paddingLeft: 4 }}>No FASTQ files yet — add some above.</div>
+                          <div className="empty-msg" style={{ paddingLeft: 4 }}>
+                            No FASTQ files yet — add some from the <strong>Inputs</strong> pane on the right.
+                          </div>
                         )}
                         {samples[proj.name]?.map((s) => {
                           const key = sampleKey(proj.name, s);
@@ -907,33 +842,120 @@ export default function App() {
               </div>
             </section>
 
-            {/* RIGHT — samples selected for a batch run */}
-            <section className="panel">
-              <div className="panel-header">
-                <h2>Selected for run</h2>
-                {Object.keys(checkedKeys).length > 0 && (
-                  <button className="ghost action" onClick={() => setCheckedKeys({})}>Clear</button>
-                )}
-              </div>
-              {Object.keys(checkedKeys).length === 0 ? (
-                <div className="empty-msg">
-                  Check one or more samples on the left, then run them as a batch from “Run Kraken” below.
-                  Click a sample’s name to view its results inline.
+            {/* RIGHT — Inputs (add samples) + batch selection, stacked */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 20, minWidth: 0 }}>
+              {/* Inputs pane — mirrors vSNP: acts on the active project */}
+              <section className="panel">
+                <div className="panel-header">
+                  <h2>Inputs</h2>
+                  {activeProject && (
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      {activeProject}
+                      {inputsByProj[activeProject]?.count > 0 ? ` · ${inputsByProj[activeProject].count} in download/` : ""}
+                    </span>
+                  )}
                 </div>
-              ) : (
-                <div className="selection-box">
-                  <div className="sel-title">{Object.keys(checkedKeys).length} sample(s) queued</div>
-                  {Object.entries(checkedKeys).map(([key, samp]) => (
-                    <div key={key} className="sel-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span className="sel-name" style={{ flex: 1 }}>{samp.sample}</span>
-                      <span className="muted" style={{ fontSize: 11 }}>{samp.project}</span>
-                      <button className="ghost" style={{ fontSize: 11 }}
-                              onClick={() => toggleChecked(samp.project, samp)} title="Remove from batch">✕</button>
+                {!activeProject ? (
+                  <div className="empty-msg">
+                    Select a project on the left to import, upload, or download FASTQ files into it.
+                  </div>
+                ) : (
+                  <>
+                    {/* Import from a server path */}
+                    <div className="form-section">
+                      <label className="form-label">Import from a server path</label>
+                      <div className="row" style={{ margin: 0 }}>
+                        <input
+                          placeholder="/srv/kapurlab/… folder or .fastq.gz file"
+                          value={addPath[activeProject] || ""}
+                          onChange={(e) => setAddPath((m) => ({ ...m, [activeProject]: e.target.value }))}
+                          onKeyDown={(e) => { if (e.key === "Enter") linkLocal(activeProject); }}
+                        />
+                        <button className="ghost action" onClick={() => linkLocal(activeProject)} disabled={!(addPath[activeProject] || "").trim()}>Link</button>
+                      </div>
+                      <div className="form-hint">Symlinks every .fastq.gz found — no copying.</div>
                     </div>
-                  ))}
+
+                    {/* Drag & drop / choose files */}
+                    <div className="form-section">
+                      <label className="form-label">Upload / drag &amp; drop</label>
+                      <div
+                        className="dropzone"
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => { e.preventDefault(); uploadFiles(activeProject, e.dataTransfer.files); }}
+                      >
+                        <button type="button" className="ghost action" onClick={() => pickFiles(activeProject)}>Choose files</button>
+                        <span className="muted" style={{ fontSize: 12 }}>or drop .fastq.gz here</span>
+                      </div>
+                    </div>
+
+                    {/* SRA download */}
+                    <div className="form-section">
+                      <label className="form-label">Download from SRA / ENA</label>
+                      <div className="row" style={{ margin: 0 }}>
+                        <input
+                          placeholder="SRR/ERR/DRR or SRX/SRS/PRJNA (space or comma separated)"
+                          value={sraText[activeProject] || ""}
+                          onChange={(e) => setSraText((m) => ({ ...m, [activeProject]: e.target.value }))}
+                          onKeyDown={(e) => { if (e.key === "Enter") sraDownload(activeProject); }}
+                        />
+                        <button className="ghost action" onClick={() => sraDownload(activeProject)} disabled={!parseAccessions(sraText[activeProject]).length || running}>Download</button>
+                      </div>
+                      <div className="form-hint">Runs in the background; progress appears in the Pipeline Log.</div>
+                    </div>
+
+                    {addStatus[activeProject] && <div className="note">{addStatus[activeProject]}</div>}
+
+                    {/* Files already in download/ */}
+                    {inputsByProj[activeProject]?.files?.length > 0 && (
+                      <div className="form-section">
+                        <label className="form-label">
+                          Files in download/ ({inputsByProj[activeProject].count}, {fmtSize(inputsByProj[activeProject].total_bytes)})
+                          <button className="ghost" style={{ fontSize: 11, padding: "1px 7px", marginLeft: 6 }} onClick={() => loadInputs(activeProject)} title="Refresh">↻</button>
+                        </label>
+                        <div className="input-files">
+                          {inputsByProj[activeProject].files.map((f) => (
+                            <div key={f.name} className="input-file-row">
+                              <span className="file-name" title={f.name} style={{ flex: 1 }}>{f.name}</span>
+                              <span className="file-size">{fmtSize(f.size)}</span>
+                              <button className="ghost" style={{ fontSize: 11, padding: "2px 7px" }} title="Remove from download/" onClick={() => deleteInput(activeProject, f.name)}>✕</button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </section>
+
+              {/* Batch selection pane */}
+              <section className="panel">
+                <div className="panel-header">
+                  <h2>Selected for run</h2>
+                  {Object.keys(checkedKeys).length > 0 && (
+                    <button className="ghost action" onClick={() => setCheckedKeys({})}>Clear</button>
+                  )}
                 </div>
-              )}
-            </section>
+                {Object.keys(checkedKeys).length === 0 ? (
+                  <div className="empty-msg">
+                    Check one or more samples on the left, then run them as a batch from “Run Kraken” below.
+                    Click a sample’s name to view its results inline.
+                  </div>
+                ) : (
+                  <div className="selection-box">
+                    <div className="sel-title">{Object.keys(checkedKeys).length} sample(s) queued</div>
+                    {Object.entries(checkedKeys).map(([key, samp]) => (
+                      <div key={key} className="sel-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span className="sel-name" style={{ flex: 1 }}>{samp.sample}</span>
+                        <span className="muted" style={{ fontSize: 11 }}>{samp.project}</span>
+                        <button className="ghost" style={{ fontSize: 11 }}
+                                onClick={() => toggleChecked(samp.project, samp)} title="Remove from batch">✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </div>
           </div>
         )}
 

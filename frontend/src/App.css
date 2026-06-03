@@ -327,19 +327,7 @@ button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20p
 .badge-pe { background: #dbeafe; color: #1d4ed8; }
 .badge-se { background: #ecfdf3; color: #166534; }
 
-/* ── Add samples (import / drag-drop / SRA) ───────────────────────────────── */
-.add-samples {
-  border: 1px dashed var(--border);
-  border-radius: 10px;
-  background: var(--panel-2);
-  margin-bottom: 8px;
-}
-.add-samples-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 10px; cursor: pointer; user-select: none;
-}
-.add-samples-body { padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 12px; }
-.add-block { display: flex; flex-direction: column; gap: 6px; }
+/* ── Inputs pane (import / drag-drop / SRA) ───────────────────────────────── */
 .dropzone {
   display: flex; align-items: center; gap: 10px;
   border: 1px dashed var(--border); border-radius: 10px;

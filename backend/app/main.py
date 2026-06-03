@@ -499,11 +499,18 @@ def _collect_result_files(run_dir: Path, include_all: bool) -> List[Dict]:
         category = _result_category(rel)
         if not include_all and category is None:
             continue
+        stat = p.stat()
         files.append({
             "name": rel,
             "path": str(p),
             "label": _result_label(rel, category),
-            "size": p.stat().st_size,
+            "size": stat.st_size,
+            # _dedupe_primary_results compares mtimes to keep only the newest
+            # file in singleton categories (krona/stats/coverage). Without this
+            # key it raised KeyError once a sample had 2+ krona files (reruns),
+            # 500-ing the per-sample results endpoint so the GUI showed
+            # "No Kraken results yet" even though the files were on disk.
+            "mtime": stat.st_mtime,
             "openable": _can_open_inline(rel),
             "category": category,
         })
@@ -518,6 +525,7 @@ def _collect_result_files(run_dir: Path, include_all: bool) -> List[Dict]:
 
     files.sort(key=sort_key)
     for f in files:
+        f.pop("mtime", None)
         if include_all and f.get("category") is None:
             f["label"] = f["name"]
     return files

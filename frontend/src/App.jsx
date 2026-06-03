@@ -498,7 +498,7 @@ export default function App() {
       {/* ── Header ─────────────────────────────────────────────── */}
       <header className="app-header">
         <div className="app-brand">
-          <img className="app-logo" src="./kraken_icon.png" alt="Kraken icon" />
+          <img className="app-logo" src="./krona_icon.svg" alt="Krona taxonomy chart icon" />
           <div>
             <h1>
               Kraken ID Parse <span className="version-tag">v{APP_VERSION}</span>

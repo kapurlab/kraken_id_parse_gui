@@ -72,6 +72,8 @@ export default function App() {
   const [jobStatus, setJobStatus] = useState("idle"); // idle | running | succeeded | failed
   const [logLines, setLogLines] = useState([]);
   const [settingsDraft, setSettingsDraft] = useState({});
+  // Server-side folder browser for picking the projects root.
+  const [folderBrowser, setFolderBrowser] = useState({ open: false, path: "", parent: null, entries: [], loading: false, error: "" });
   const [currentStep, setCurrentStep] = useState("");
 
   // Section visibility (collapsible flow, adapted from latex gui)
@@ -483,6 +485,23 @@ export default function App() {
     };
   }
 
+  // --- Project-root folder browser ---------------------------------------
+  function browseDirs(path) {
+    setFolderBrowser((s) => ({ ...s, loading: true, error: "" }));
+    fetch(`./api/browse-dirs?path=${encodeURIComponent(path || "")}`)
+      .then((r) => (r.ok ? r.json() : r.json().then((e) => { throw new Error(e.detail || "Cannot open folder"); })))
+      .then((d) => setFolderBrowser((s) => ({ ...s, path: d.path, parent: d.parent, entries: d.entries, loading: false })))
+      .catch((err) => setFolderBrowser((s) => ({ ...s, loading: false, error: err.message })));
+  }
+  function openFolderBrowser() {
+    setFolderBrowser({ open: true, path: "", parent: null, entries: [], loading: true, error: "" });
+    browseDirs(settingsDraft.projects_root || "");
+  }
+  function chooseFolder() {
+    setSettingsDraft((d) => ({ ...d, projects_root: folderBrowser.path }));
+    setFolderBrowser((s) => ({ ...s, open: false }));
+  }
+
   function saveSettings() {
     fetch("./api/config", {
       method: "POST",
@@ -631,11 +650,27 @@ export default function App() {
               </div>
               <div className="form-section">
                 <label className="form-label">Personal projects root</label>
-                <input
-                  value={settingsDraft.projects_root || ""}
-                  onChange={(e) => setSettingsDraft((d) => ({ ...d, projects_root: e.target.value }))}
-                />
-                <div className="form-hint">Shared projects at /srv/kapurlab/projects/ are always visible</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <input
+                    style={{ flex: 1 }}
+                    value={settingsDraft.projects_root || ""}
+                    onChange={(e) => setSettingsDraft((d) => ({ ...d, projects_root: e.target.value }))}
+                  />
+                  <button type="button" className="ghost" onClick={openFolderBrowser}>Browse…</button>
+                </div>
+                {Array.isArray(settingsDraft.recent_projects_roots) && settingsDraft.recent_projects_roots.length > 0 && (
+                  <select
+                    style={{ marginTop: 6, width: "100%" }}
+                    value=""
+                    onChange={(e) => { if (e.target.value) setSettingsDraft((d) => ({ ...d, projects_root: e.target.value })); }}
+                  >
+                    <option value="">↻ Recent roots…</option>
+                    {settingsDraft.recent_projects_roots.map((r) => (
+                      <option key={r} value={r}>{r}</option>
+                    ))}
+                  </select>
+                )}
+                <div className="form-hint">New projects are created under this root. Shared projects at /srv/kapurlab/projects/ are always visible. Click Save to apply.</div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
                 <button onClick={saveSettings}>Save</button>
@@ -1217,6 +1252,57 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {folderBrowser.open && (
+        <div
+          onClick={() => setFolderBrowser((s) => ({ ...s, open: false }))}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "var(--panel, #fff)", color: "inherit", borderRadius: 10, width: "min(640px, 92vw)", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}
+          >
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border, #ddd)", fontWeight: 700 }}>
+              Select a projects root
+            </div>
+            <div style={{ padding: "10px 16px", display: "flex", gap: 6, alignItems: "center" }}>
+              <button type="button" className="ghost" disabled={!folderBrowser.parent || folderBrowser.loading} onClick={() => browseDirs(folderBrowser.parent)}>↑ Up</button>
+              <input
+                style={{ flex: 1 }}
+                value={folderBrowser.path}
+                onChange={(e) => setFolderBrowser((s) => ({ ...s, path: e.target.value }))}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); browseDirs(folderBrowser.path); } }}
+              />
+              <button type="button" className="ghost" onClick={() => browseDirs(folderBrowser.path)}>Go</button>
+            </div>
+            <div style={{ flex: 1, overflow: "auto", padding: "0 16px", minHeight: 160 }}>
+              {folderBrowser.loading ? (
+                <div className="note" style={{ padding: 12 }}>Loading…</div>
+              ) : folderBrowser.error ? (
+                <div className="note" style={{ padding: 12, color: "var(--danger, #c00)" }}>{folderBrowser.error}</div>
+              ) : folderBrowser.entries.length === 0 ? (
+                <div className="note" style={{ padding: 12 }}>No sub-folders here.</div>
+              ) : (
+                folderBrowser.entries.map((e) => (
+                  <div
+                    key={e.path}
+                    onClick={() => browseDirs(e.path)}
+                    style={{ padding: "7px 8px", cursor: "pointer", borderRadius: 6, display: "flex", gap: 8, alignItems: "center" }}
+                    onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--panel-2, #f0f0f0)")}
+                    onMouseLeave={(ev) => (ev.currentTarget.style.background = "transparent")}
+                  >
+                    <span>📁</span><span>{e.name}</span>
+                  </div>
+                ))
+              )}
+            </div>
+            <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border, #ddd)", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" className="ghost" onClick={() => setFolderBrowser((s) => ({ ...s, open: false }))}>Cancel</button>
+              <button type="button" onClick={chooseFolder} disabled={folderBrowser.loading || !folderBrowser.path}>Select this folder</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

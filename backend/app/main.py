@@ -841,8 +841,45 @@ def api_save_config(payload: ConfigPayload):
     cfg = load_config()
     updates = payload.model_dump(exclude_none=True)
     cfg.update(updates)
+    # Track recently-used project roots (MRU, max 10) for quick switching.
+    new_root = (updates.get("projects_root") or "").strip()
+    if new_root:
+        recent = [r for r in cfg.get("recent_projects_roots", []) if r != new_root]
+        recent.insert(0, new_root)
+        cfg["recent_projects_roots"] = recent[:10]
     save_config(cfg)
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/browse-dirs")
+def api_browse_dirs(path: str = ""):
+    """List sub-directories of `path` for the project-root folder picker.
+
+    Runs as the OOD session user, so the OS filesystem permissions are the only
+    limit on what can be browsed. Defaults to the user's home when no path is
+    given. Returns the resolved path, its parent (null at the filesystem root),
+    and the immediate sub-directories.
+    """
+    try:
+        p = (Path(path).expanduser() if path.strip() else Path.home()).resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(400, "Invalid path")
+    if not p.is_dir():
+        raise HTTPException(400, f"Not a directory: {p}")
+    entries: List[Dict[str, str]] = []
+    try:
+        for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
+            if child.name.startswith("."):
+                continue
+            try:
+                if child.is_dir():
+                    entries.append({"name": child.name, "path": str(child)})
+            except OSError:
+                continue
+    except PermissionError:
+        raise HTTPException(403, f"Permission denied: {p}")
+    parent = str(p.parent) if p.parent != p else None
+    return JSONResponse({"path": str(p), "parent": parent, "entries": entries})
 
 
 class RunPayload(BaseModel):

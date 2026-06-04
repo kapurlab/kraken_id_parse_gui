@@ -1102,7 +1102,7 @@ export default function App() {
                   </button>
                 </div>
                 <div className="note" style={{ marginTop: 4 }}>
-                  New taxa are saved to the shared list (config/taxa.yaml) and appear in this dropdown and the vSNP GUI.
+                  New taxa are saved to the shared list (/srv/kapurlab/tools/kraken_id_parse_gui/config/taxa.yaml) and appear in this dropdown and the vSNP GUI.
                 </div>
               </div>
 

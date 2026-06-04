@@ -57,6 +57,68 @@ _SHARED_PROJECTS = Path("/srv/kapurlab/projects")
 # Jobs log directory (inside repo so it survives across sessions)
 _JOBS_DIR = _REPO_ROOT / "backend" / "jobs"
 
+# Shared taxon-search-name list (single source of truth, also read by the vSNP
+# GUI). A plain YAML sequence of strings — see config/taxa.yaml.
+_TAXA_YAML = _REPO_ROOT / "config" / "taxa.yaml"
+
+_TAXA_HEADER = (
+    "# Kraken ID Parse — taxon search names\n"
+    "#\n"
+    "# Single source of truth for the \"Target Taxon\" presets shown in BOTH the\n"
+    "# Kraken ID Parse GUI and the vSNP GUI. Each entry is a taxonomy\n"
+    "# classification name passed verbatim to the read parser (-t) and must match\n"
+    "# the name exactly as Kraken reports it. Plain YAML sequence; add by hand or\n"
+    "# via the \"Add search name\" control in either GUI.\n"
+)
+
+
+def _read_taxa() -> List[str]:
+    """Read the taxon list from config/taxa.yaml.
+
+    Dependency-free parser for a flat YAML sequence (``- name`` per line) so it
+    works regardless of whether PyYAML is installed. Tolerates inline ``#``
+    comments and optional surrounding quotes. Order and duplicates are
+    preserved as written, minus blanks.
+    """
+    taxa: List[str] = []
+    try:
+        text = _TAXA_YAML.read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return taxa
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        elif line == "-":
+            continue
+        # strip a trailing inline comment (only when unquoted)
+        if line and line[0] not in "\"'" and " #" in line:
+            line = line.split(" #", 1)[0].strip()
+        if len(line) >= 2 and line[0] in "\"'" and line[-1] == line[0]:
+            line = line[1:-1]
+        if line:
+            taxa.append(line)
+    return taxa
+
+
+def _write_taxa(taxa: List[str]) -> None:
+    """Rewrite config/taxa.yaml as a flat YAML sequence, preserving the header."""
+    _TAXA_YAML.parent.mkdir(parents=True, exist_ok=True)
+    lines = [_TAXA_HEADER]
+    for name in taxa:
+        name = name.strip()
+        if not name:
+            continue
+        # Quote entries containing YAML-significant leading chars to stay valid.
+        if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
+            esc = name.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'- "{esc}"')
+        else:
+            lines.append(f"- {name}")
+    _TAXA_YAML.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
 # ---------------------------------------------------------------------------
 # App & job manager
 # ---------------------------------------------------------------------------
@@ -732,6 +794,36 @@ def api_project_file(name: str, path: str = Query(...), inline: int = 0):
     return FileResponse(target, media_type=media_type, headers=headers)
 
 
+@app.get("/api/taxa")
+def api_get_taxa():
+    """Return the configured taxon search names (config/taxa.yaml)."""
+    return JSONResponse({"taxa": _read_taxa()})
+
+
+class TaxonPayload(BaseModel):
+    name: str
+
+
+@app.post("/api/taxa")
+def api_add_taxon(payload: TaxonPayload):
+    """Append a new taxon search name to config/taxa.yaml (no duplicates).
+
+    Returns the full updated list so the caller can refresh in one round trip.
+    """
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(400, "A taxon name is required.")
+    taxa = _read_taxa()
+    if any(name.lower() == t.lower() for t in taxa):
+        return JSONResponse({"taxa": taxa, "added": False})
+    taxa.append(name)
+    try:
+        _write_taxa(taxa)
+    except OSError as exc:
+        raise HTTPException(500, f"Could not save taxon list: {exc}")
+    return JSONResponse({"taxa": taxa, "added": True})
+
+
 @app.get("/api/config")
 def api_get_config():
     return JSONResponse(load_config())
@@ -761,6 +853,7 @@ class RunPayload(BaseModel):
     kraken_db: Optional[str] = None
     blast_db: Optional[str] = None
     kraken_only: bool = False   # run only Kraken2 + Krona graph; skip parsing/assembly/BLAST
+    no_blast: bool = False       # run Kraken2 + read parsing only; skip assembly/BLAST/coverage
 
 
 @app.post("/api/run")
@@ -771,11 +864,13 @@ def api_run(payload: RunPayload):
     taxon = (payload.taxon or "").strip()
 
     # Taxon drives the read-parsing/assembly/BLAST identification, which
-    # kraken-only mode skips — so it's only required for a full run.
+    # kraken-only mode skips — so it's only required for runs that parse.
     if not payload.kraken_only and not taxon:
         raise HTTPException(400, "A target taxon is required for a full run.")
     if payload.kraken_only and not kraken_db:
         raise HTTPException(400, "Kraken-only mode requires a Kraken DB path.")
+    if payload.no_blast and not kraken_db:
+        raise HTTPException(400, "Parse-only (skip BLAST) mode requires a Kraken DB path.")
 
     # Validate paths
     r1 = Path(payload.r1)
@@ -825,6 +920,8 @@ def api_run(payload: RunPayload):
         command.extend(["-k", kraken_db])
     if payload.kraken_only:
         command.append("--kraken-only")
+    elif payload.no_blast:
+        command.append("--no-blast")
     elif blast_db:
         command.extend(["-b", blast_db])
 
@@ -834,7 +931,12 @@ def api_run(payload: RunPayload):
         "PYTHONUNBUFFERED": "1",  # belt-and-suspenders with `python -u`
     }
 
-    job_label = "Kraken-only (Krona)" if payload.kraken_only else (taxon or "run")
+    if payload.kraken_only:
+        job_label = "Kraken-only (Krona)"
+    elif payload.no_blast:
+        job_label = f"{taxon} (parse only)" if taxon else "parse only"
+    else:
+        job_label = taxon or "run"
     job_name = f"{payload.project}/{sample_name} — {job_label}"
     job_id = job_manager.start_job(name=job_name, command=command, cwd=run_dir, env=env)
     return JSONResponse({"job_id": job_id, "run_dir": str(run_dir)})

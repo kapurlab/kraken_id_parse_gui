@@ -6,7 +6,9 @@ import "./App.css";
 // ---------------------------------------------------------------------------
 const APP_VERSION = "0.2.0";
 
-const TAXON_PRESETS = [
+// Taxon presets are loaded at runtime from the shared config/taxa.yaml via
+// /api/taxa. This fallback is only used if that fetch fails.
+const TAXON_PRESETS_FALLBACK = [
   "Mycobacterium tuberculosis complex",
   "Mycobacterium bovis",
   "Orbivirus",
@@ -58,7 +60,11 @@ export default function App() {
   const [activeRun, setActiveRun] = useState(null);      // {project, sample} currently running
   const [queueInfo, setQueueInfo] = useState({ total: 0, done: 0 }); // batch progress
   const [taxon, setTaxon] = useState("");
+  const [taxonPresets, setTaxonPresets] = useState(TAXON_PRESETS_FALLBACK); // from /api/taxa
+  const [newTaxon, setNewTaxon] = useState("");          // "add search name" input
+  const [addingTaxon, setAddingTaxon] = useState(false);
   const [krakenOnly, setKrakenOnly] = useState(false);   // Kraken2 + Krona only, no read parsing
+  const [noBlast, setNoBlast] = useState(false);         // Kraken2 + read parsing only, no assembly/BLAST
   const [krakenDb, setKrakenDb] = useState("");
   const [blastDb, setBlastDb] = useState("nt");
   const [running, setRunning] = useState(false);
@@ -85,6 +91,12 @@ export default function App() {
         setKrakenDb(cfg.kraken_db || "");
         setBlastDb(cfg.blast_db || "nt");
         setSettingsDraft(cfg);
+      })
+      .catch(() => {});
+    fetch("./api/taxa")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d.taxa) && d.taxa.length) setTaxonPresets(d.taxa);
       })
       .catch(() => {});
     loadProjects();
@@ -118,6 +130,30 @@ export default function App() {
         setProjectsLoading(false);
       })
       .catch(() => setProjectsLoading(false));
+  }
+
+  // Persist a new taxon search name to the shared config/taxa.yaml and select it.
+  async function addTaxon() {
+    const name = newTaxon.trim();
+    if (!name || addingTaxon) return;
+    setAddingTaxon(true);
+    try {
+      const res = await fetch("./api/taxa", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        if (Array.isArray(d.taxa)) setTaxonPresets(d.taxa);
+        setTaxon(name);
+        setNewTaxon("");
+      }
+    } catch (_) {
+      /* leave the input as-is so the user can retry */
+    } finally {
+      setAddingTaxon(false);
+    }
   }
 
   // Create a new project (personal root by default). Projects share the same
@@ -393,6 +429,7 @@ export default function App() {
           kraken_db: krakenDb.trim() || null,
           blast_db: blastDb.trim() || null,
           kraken_only: krakenOnly,
+          no_blast: noBlast,
         }),
       })
         .then((r) => (r.ok ? r.json() : r.json().then((e) => { throw new Error(e.detail || "Run failed"); })))
@@ -882,10 +919,12 @@ export default function App() {
                     Create a project first (top of the Projects panel), then import, upload, or download FASTQ files into it.
                   </div>
                 ) : (
-                  <>
-                    {/* Import from a server path */}
-                    <div className="form-section">
-                      <label className="form-label">Import from a server path</label>
+                  <div className="input-columns">
+                    {/* ── LEFT: Bring Your Own FASTQ ───────────────────────── */}
+                    <div className="input-column">
+                      <h3>Bring Your Own FASTQ</h3>
+
+                      {/* Import from a server path */}
                       <div className="row" style={{ margin: 0 }}>
                         <input
                           placeholder="/srv/kapurlab/… folder or .fastq.gz file"
@@ -896,64 +935,66 @@ export default function App() {
                         <button className="ghost action" onClick={() => linkLocal(activeProject)} disabled={!(addPath[activeProject] || "").trim()}>Link</button>
                       </div>
                       <div className="form-hint">Symlinks every .fastq.gz found — no copying.</div>
-                    </div>
 
-                    {/* Drag & drop / choose files */}
-                    <div className="form-section">
-                      <label className="form-label">Upload / drag &amp; drop</label>
-                      <div
-                        className="dropzone"
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={(e) => { e.preventDefault(); uploadFiles(activeProject, e.dataTransfer.files); }}
-                      >
-                        <button type="button" className="ghost action" onClick={() => pickFiles(activeProject)}>Choose files</button>
-                        <span className="muted" style={{ fontSize: 12 }}>or drop .fastq.gz here</span>
+                      {/* Upload / drag & drop */}
+                      <div className="block">
+                        <h3>Upload / Drag &amp; Drop</h3>
+                        <div
+                          className="dropzone"
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={(e) => { e.preventDefault(); uploadFiles(activeProject, e.dataTransfer.files); }}
+                        >
+                          <button type="button" onClick={() => pickFiles(activeProject)}>Choose Files</button>
+                          <span className="drop-hint">Or drop FASTQ.GZ files here</span>
+                        </div>
+                        {addStatus[activeProject] && <div className="note" style={{ marginBottom: 0 }}>{addStatus[activeProject]}</div>}
                       </div>
+
+                      {/* Files already in download/ */}
+                      {inputsByProj[activeProject]?.files?.length > 0 && (
+                        <div className="block">
+                          <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ flex: 1 }}>
+                              Files in download/
+                              <span className="muted" style={{ marginLeft: 6, fontWeight: 400, fontSize: 12 }}>
+                                ({inputsByProj[activeProject].count}, {fmtSize(inputsByProj[activeProject].total_bytes)})
+                              </span>
+                            </span>
+                            <button className="ghost" style={{ fontSize: 11, padding: "2px 8px" }} onClick={() => loadInputs(activeProject)} title="Refresh">Refresh</button>
+                          </h3>
+                          <div className="input-files">
+                            {inputsByProj[activeProject].files.map((f) => (
+                              <div key={f.name} className="input-file-row">
+                                <span className="file-name" title={f.name} style={{ flex: 1 }}>{f.name}</span>
+                                <span className="file-size">{fmtSize(f.size)}</span>
+                                <button className="ghost" style={{ fontSize: 11, padding: "2px 7px" }} title="Remove from download/" onClick={() => deleteInput(activeProject, f.name)}>✕</button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
-                    {/* SRA download */}
-                    <div className="form-section">
-                      <label className="form-label">Download from SRA / ENA</label>
+                    {/* ── RIGHT: SRA Download ──────────────────────────────── */}
+                    <div className="input-column">
+                      <h3>SRA Download</h3>
                       <textarea
-                        rows={5}
+                        rows={6}
                         placeholder={"SRR/ERR/DRR or SRX/SRS/PRJNA accessions\n(one per line)"}
                         value={sraText[activeProject] || ""}
                         onChange={(e) => setSraText((m) => ({ ...m, [activeProject]: e.target.value }))}
                         style={{ resize: "vertical", fontFamily: "inherit" }}
                       />
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-                        <button
-                          className="ghost action"
-                          onClick={() => sraDownload(activeProject)}
-                          disabled={!parseAccessions(sraText[activeProject]).length || running}
-                        >
-                          Download{parseAccessions(sraText[activeProject]).length ? ` (${parseAccessions(sraText[activeProject]).length})` : ""}
-                        </button>
-                        <span className="form-hint" style={{ marginTop: 0 }}>Runs in the background; progress appears in the Pipeline Log.</span>
-                      </div>
+                      <button
+                        style={{ width: "100%" }}
+                        onClick={() => sraDownload(activeProject)}
+                        disabled={!parseAccessions(sraText[activeProject]).length || running}
+                      >
+                        Download{parseAccessions(sraText[activeProject]).length ? ` (${parseAccessions(sraText[activeProject]).length})` : ""}
+                      </button>
+                      <div className="form-hint">Runs in the background; progress appears in the Pipeline Log.</div>
                     </div>
-
-                    {addStatus[activeProject] && <div className="note">{addStatus[activeProject]}</div>}
-
-                    {/* Files already in download/ */}
-                    {inputsByProj[activeProject]?.files?.length > 0 && (
-                      <div className="form-section">
-                        <label className="form-label">
-                          Files in download/ ({inputsByProj[activeProject].count}, {fmtSize(inputsByProj[activeProject].total_bytes)})
-                          <button className="ghost" style={{ fontSize: 11, padding: "1px 7px", marginLeft: 6 }} onClick={() => loadInputs(activeProject)} title="Refresh">↻</button>
-                        </label>
-                        <div className="input-files">
-                          {inputsByProj[activeProject].files.map((f) => (
-                            <div key={f.name} className="input-file-row">
-                              <span className="file-name" title={f.name} style={{ flex: 1 }}>{f.name}</span>
-                              <span className="file-size">{fmtSize(f.size)}</span>
-                              <button className="ghost" style={{ fontSize: 11, padding: "2px 7px" }} title="Remove from download/" onClick={() => deleteInput(activeProject, f.name)}>✕</button>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </>
+                  </div>
                 )}
               </section>
 
@@ -1008,7 +1049,7 @@ export default function App() {
                   <input
                     type="checkbox"
                     checked={krakenOnly}
-                    onChange={(e) => setKrakenOnly(e.target.checked)}
+                    onChange={(e) => { setKrakenOnly(e.target.checked); if (e.target.checked) setNoBlast(false); }}
                     disabled={running}
                   />
                   <span>Kraken only (Krona graph, no read parsing)</span>
@@ -1016,27 +1057,52 @@ export default function App() {
                 <div className="note" style={{ marginTop: 4 }}>
                   Runs Kraken2 and produces the Krona graph only — skips read parsing, assembly, and BLAST. No target taxon needed.
                 </div>
+                <label className="checkbox-label" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginTop: 10 }}>
+                  <input
+                    type="checkbox"
+                    checked={noBlast}
+                    onChange={(e) => { setNoBlast(e.target.checked); if (e.target.checked) setKrakenOnly(false); }}
+                    disabled={running}
+                  />
+                  <span>Parse reads only (skip BLAST)</span>
+                </label>
+                <div className="note" style={{ marginTop: 4 }}>
+                  Runs Kraken2 and extracts the target taxon's reads, then stops — skips assembly, BLAST, and coverage. Leaves the parsed FASTQ.gz reads. Requires a target taxon.
+                </div>
               </div>
 
               <div className="form-section">
                 <label className="form-label">Target Taxon</label>
-                <input
-                  placeholder='e.g. "Mycobacterium tuberculosis complex"'
+                <select
                   value={taxon}
                   onChange={(e) => setTaxon(e.target.value)}
                   disabled={running || krakenOnly}
-                />
-                <div className="taxon-presets">
-                  {TAXON_PRESETS.map((p) => (
-                    <button
-                      key={p}
-                      className={`preset-btn ${taxon === p ? "active" : ""}`}
-                      onClick={() => setTaxon(p)}
-                      disabled={running || krakenOnly}
-                    >
-                      {p}
-                    </button>
+                >
+                  <option value="">Select a target taxon…</option>
+                  {taxonPresets.map((p) => (
+                    <option key={p} value={p}>{p}</option>
                   ))}
+                </select>
+                <div className="add-taxon-row" style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                  <input
+                    placeholder="Add a new taxon to the list…"
+                    value={newTaxon}
+                    onChange={(e) => setNewTaxon(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTaxon(); } }}
+                    disabled={running || addingTaxon}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={addTaxon}
+                    disabled={running || addingTaxon || !newTaxon.trim()}
+                  >
+                    {addingTaxon ? "Adding…" : "+ Add"}
+                  </button>
+                </div>
+                <div className="note" style={{ marginTop: 4 }}>
+                  New taxa are saved to the shared list (config/taxa.yaml) and appear in this dropdown and the vSNP GUI.
                 </div>
               </div>
 
@@ -1059,7 +1125,7 @@ export default function App() {
                   placeholder="nt  or  /srv/kapurlab/databases/blast/nt"
                   value={blastDb}
                   onChange={(e) => setBlastDb(e.target.value)}
-                  disabled={running || krakenOnly}
+                  disabled={running || krakenOnly || noBlast}
                 />
               </div>
 

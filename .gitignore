@@ -1,0 +1,5 @@
+
+# conda env + caches (never commit)
+env/
+__pycache__/
+backend/jobs/

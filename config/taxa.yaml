@@ -6,8 +6,25 @@
 # the name exactly as Kraken reports it. Plain YAML sequence; add by hand or
 # via the "Add search name" control in either GUI.
 
-- Mycobacterium tuberculosis complex
-- Mycobacterium bovis
-- Orbivirus
-- Apicomplexa
-- Isavirus salaris
+-Mycobacterium tuberculosis complex
+-Viruses
+-Apicomplexa
+-Retroviridae
+-Flaviviridae
+-Orbivirus
+-Metapneumovirus
+-Poxviridae
+-Adenoviridae
+-Coronaviridae
+-Vesiculovirus
+-Paramyxoviridae
+-Megaviricetes
+-Poxviridae
+-Isavirus salaris
+-Mycobacterium tuberculosis complex
+-Leptospirales
+-Brucellaceae
+-Asfivirus
+-Arteriviridae
+-Novirhabdovirus
+-Orbivirus

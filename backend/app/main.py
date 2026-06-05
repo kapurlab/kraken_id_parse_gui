@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiofiles
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +33,12 @@ from pydantic import BaseModel
 
 from .config import load_config, save_config
 from .jobs import JobManager
+from .sra import (
+    SRAExpansionError,
+    build_download_script,
+    expand_accessions_with_mapping,
+    write_crosswalk_tsv,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,6 +56,68 @@ _SHARED_PROJECTS = Path("/srv/kapurlab/projects")
 
 # Jobs log directory (inside repo so it survives across sessions)
 _JOBS_DIR = _REPO_ROOT / "backend" / "jobs"
+
+# Shared taxon-search-name list (single source of truth, also read by the vSNP
+# GUI). A plain YAML sequence of strings — see config/taxa.yaml.
+_TAXA_YAML = _REPO_ROOT / "config" / "taxa.yaml"
+
+_TAXA_HEADER = (
+    "# Kraken ID Parse — taxon search names\n"
+    "#\n"
+    "# Single source of truth for the \"Target Taxon\" presets shown in BOTH the\n"
+    "# Kraken ID Parse GUI and the vSNP GUI. Each entry is a taxonomy\n"
+    "# classification name passed verbatim to the read parser (-t) and must match\n"
+    "# the name exactly as Kraken reports it. Plain YAML sequence; add by hand or\n"
+    "# via the \"Add search name\" control in either GUI.\n"
+)
+
+
+def _read_taxa() -> List[str]:
+    """Read the taxon list from config/taxa.yaml.
+
+    Dependency-free parser for a flat YAML sequence (``- name`` per line) so it
+    works regardless of whether PyYAML is installed. Tolerates inline ``#``
+    comments and optional surrounding quotes. Order and duplicates are
+    preserved as written, minus blanks.
+    """
+    taxa: List[str] = []
+    try:
+        text = _TAXA_YAML.read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return taxa
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        elif line == "-":
+            continue
+        # strip a trailing inline comment (only when unquoted)
+        if line and line[0] not in "\"'" and " #" in line:
+            line = line.split(" #", 1)[0].strip()
+        if len(line) >= 2 and line[0] in "\"'" and line[-1] == line[0]:
+            line = line[1:-1]
+        if line:
+            taxa.append(line)
+    return taxa
+
+
+def _write_taxa(taxa: List[str]) -> None:
+    """Rewrite config/taxa.yaml as a flat YAML sequence, preserving the header."""
+    _TAXA_YAML.parent.mkdir(parents=True, exist_ok=True)
+    lines = [_TAXA_HEADER]
+    for name in taxa:
+        name = name.strip()
+        if not name:
+            continue
+        # Quote entries containing YAML-significant leading chars to stay valid.
+        if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
+            esc = name.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'- "{esc}"')
+        else:
+            lines.append(f"- {name}")
+    _TAXA_YAML.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # App & job manager
@@ -125,6 +193,93 @@ def _get_project_dir(name: str) -> Optional[Path]:
         if candidate.is_dir():
             return candidate
     return None
+
+
+# ---------------------------------------------------------------------------
+# Project creation.
+#
+# A project created here uses the SAME on-disk skeleton vSNP GUI creates, so a
+# project made in Kraken ID Parse is immediately usable in vSNP (and vice
+# versa) — both tools share /srv/kapurlab/projects and per-user ~/projects and
+# list whatever is on disk. We add the kraken/ subdir up front so the sample
+# browser and results endpoints have a stable layout.
+# ---------------------------------------------------------------------------
+_PROJECT_NAME_OK_CHARSET = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _normalize_project_name(name: str) -> str:
+    """Filesystem-safe project dir name. Mirrors vsnp_gui's rules so a name
+    accepted in one tool is accepted in the other: spaces auto-convert to
+    underscores (downstream CLIs don't quote paths), other unsafe chars are
+    rejected with a clear message."""
+    if not isinstance(name, str):
+        raise ValueError("Project name must be a string")
+    cleaned = re.sub(r"\s+", "_", name.strip())
+    if not cleaned:
+        raise ValueError("Project name is empty")
+    if cleaned.startswith("."):
+        raise ValueError("Project name cannot start with '.'")
+    if len(cleaned) > 100:
+        raise ValueError("Project name too long (max 100 characters)")
+    if not _PROJECT_NAME_OK_CHARSET.match(cleaned):
+        bad = sorted(set(ch for ch in cleaned if not re.match(r"[A-Za-z0-9._-]", ch)))
+        raise ValueError(
+            f"Project name contains unsupported characters: {''.join(bad)!r}. "
+            "Only letters, digits, _ - . are allowed (spaces become underscores)."
+        )
+    return cleaned
+
+
+def _ensure_project_dirs(project_dir: Path) -> None:
+    (project_dir / "download").mkdir(parents=True, exist_ok=True)
+    (project_dir / "kraken").mkdir(parents=True, exist_ok=True)
+    # vSNP-compatible layout so the project is shared cleanly between tools.
+    (project_dir / "step1").mkdir(parents=True, exist_ok=True)
+    (project_dir / "step2" / "vcf_source").mkdir(parents=True, exist_ok=True)
+    (project_dir / f"{project_dir.name}_VCFs").mkdir(parents=True, exist_ok=True)
+
+
+def _create_project(name: str, scope: str) -> Path:
+    """Create a project under the requested scope ('personal' or 'shared').
+
+    Personal projects land under the user's configured projects_root (defaults
+    to ~/projects). Shared projects land under /srv/kapurlab/projects, which is
+    only writable where the lab has granted it — a PermissionError there is
+    surfaced as a clear 400 rather than a stack trace.
+    """
+    name = _normalize_project_name(name)
+    cfg = load_config()
+    if scope == _SCOPE_SHARED:
+        root = _SHARED_PROJECTS
+    else:
+        root = Path(cfg.get("projects_root", "") or (Path.home() / "projects"))
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"Cannot create projects root {root}: {exc}")
+    project_dir = root / name
+    if project_dir.exists():
+        raise ValueError(f"Project already exists: {name}")
+    try:
+        _ensure_project_dirs(project_dir)
+    except PermissionError:
+        raise ValueError(
+            f"No permission to create a project under {root}. "
+            "Shared projects require lab write access; create it as a personal "
+            "project instead."
+        )
+    meta = {"name": name, "created_at": _now_iso(), "status": "created"}
+    try:
+        with open(project_dir / "project.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
+    except OSError:
+        pass
+    return project_dir
+
+
+def _now_iso() -> str:
+    from datetime import datetime
+    return datetime.now().isoformat(timespec="seconds")
 
 
 # Matches _R1/_R2 (with optional _001 etc.) or _1/_2 immediately before .fastq.gz
@@ -209,6 +364,174 @@ def api_list_projects():
     return JSONResponse(projects)
 
 
+class ProjectCreate(BaseModel):
+    name: str
+    scope: Optional[str] = None   # "personal" (default) | "shared"
+
+
+@app.post("/api/projects")
+def api_create_project(payload: ProjectCreate):
+    scope = (payload.scope or _SCOPE_PERSONAL).strip() or _SCOPE_PERSONAL
+    if scope not in (_SCOPE_PERSONAL, _SCOPE_SHARED):
+        raise HTTPException(400, f"Invalid scope: {scope!r}")
+    try:
+        project_dir = _create_project(payload.name, scope)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return JSONResponse({"name": project_dir.name, "path": str(project_dir), "scope": scope})
+
+
+# ---------------------------------------------------------------------------
+# Loading samples into a project — import (link), upload (drag & drop), and
+# SRA download. Mirrors vSNP GUI so a project can be populated from within
+# either tool. All three land FASTQs in <project>/download/, which the sample
+# browser and the run endpoints already read.
+# ---------------------------------------------------------------------------
+def _writable_project_dir(name: str) -> Path:
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    (project_dir / "download").mkdir(parents=True, exist_ok=True)
+    return project_dir
+
+
+@app.get("/api/projects/{name}/inputs")
+def api_project_inputs(name: str):
+    """List files currently in <project>/download/ (name + size + mtime)."""
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    download_dir = project_dir / "download"
+    files: List[Dict] = []
+    total = 0
+    if download_dir.is_dir():
+        for p in sorted(download_dir.iterdir()):
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            files.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
+            total += st.st_size
+    return JSONResponse({"files": files, "total_bytes": total, "count": len(files)})
+
+
+@app.delete("/api/projects/{name}/inputs/{filename}")
+def api_project_input_delete(name: str, filename: str):
+    if not filename or "/" in filename or "\\" in filename or filename.startswith(".") or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    target = project_dir / "download" / filename
+    if not target.is_file() and not target.is_symlink():
+        raise HTTPException(404, f"File not found: {filename}")
+    target.unlink()
+    return JSONResponse({"deleted": filename})
+
+
+@app.post("/api/projects/{name}/upload")
+async def api_project_upload(name: str, files: List[UploadFile] = File(...)):
+    """Save drag-and-dropped / chosen FASTQ files into <project>/download/."""
+    project_dir = _writable_project_dir(name)
+    download_dir = project_dir / "download"
+    saved = 0
+    for f in files:
+        if not f.filename:
+            continue
+        target = download_dir / Path(f.filename).name
+        async with aiofiles.open(target, "wb") as out:
+            while True:
+                chunk = await f.read(1024 * 1024)
+                if not chunk:
+                    break
+                await out.write(chunk)
+        saved += 1
+    return JSONResponse({"uploaded": saved})
+
+
+class LinkLocalRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/projects/{name}/link-local")
+def api_project_link_local(name: str, payload: LinkLocalRequest):
+    """Symlink every *.fastq.gz under a server-side directory into download/.
+
+    Lets users 'import' reads that already live on the shared filesystem
+    without copying gigabytes around.
+    """
+    project_dir = _writable_project_dir(name)
+    src = Path((payload.path or "").strip()).expanduser()
+    if not src.exists():
+        raise HTTPException(400, f"Input path not found: {src}")
+    download_dir = project_dir / "download"
+    # Accept either a directory of fastqs or a single fastq file.
+    candidates = [src] if src.is_file() else sorted(src.glob("*.fastq.gz"))
+    count = 0
+    for f in candidates:
+        if not f.name.endswith(".fastq.gz"):
+            continue
+        target = download_dir / f.name
+        if not target.exists():
+            target.symlink_to(f.resolve())
+            count += 1
+    return JSONResponse({"linked": count})
+
+
+class SraRequest(BaseModel):
+    accessions: List[str]
+    folder: Optional[str] = None
+
+
+@app.post("/api/projects/{name}/sra/download")
+def api_project_sra_download(name: str, payload: SraRequest):
+    """Resolve SRA accessions and kick off a background download into
+    download/. Uses curl/ENA + (if present) fasterq-dump — the script skips
+    whatever tool isn't installed, so it works with just curl/wget."""
+    project_dir = _writable_project_dir(name)
+    try:
+        expanded, mapping = expand_accessions_with_mapping(payload.accessions, strict=True)
+    except SRAExpansionError as e:
+        raise HTTPException(
+            502,
+            f"Could not resolve SRA accessions via NCBI eutils: {e}. "
+            "This is usually NCBI rate-limiting; wait ~30 s and retry.",
+        )
+    download_root = project_dir / "download"
+    if payload.folder:
+        download_root = download_root / Path(payload.folder).name
+    download_root.mkdir(parents=True, exist_ok=True)
+    try:
+        write_crosswalk_tsv(download_root, mapping)
+    except OSError as e:
+        logger.warning("Failed to write sra_crosswalk.tsv: %s", e)
+    script = build_download_script(download_root, expanded, allow_insecure_https=False)
+    script_path = download_root / "download_sra.sh"
+    script_path.write_text(script, encoding="utf-8")
+    script_path.chmod(0o755)
+    env = {"PATH": os.environ.get("PATH", "")}
+    job_id = job_manager.start_job(
+        name=f"sra_download — {name}",
+        command=["bash", str(script_path)],
+        cwd=download_root,
+        env=env,
+    )
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/api/projects/{name}/sra-crosswalk")
+def api_project_sra_crosswalk(name: str):
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    crosswalk = project_dir / "download" / "sra_crosswalk.tsv"
+    if not crosswalk.is_file():
+        raise HTTPException(404, "No SRA crosswalk for this project")
+    return FileResponse(crosswalk, media_type="text/plain")
+
+
 @app.get("/api/projects/{name}/samples")
 def api_project_samples(name: str):
     project_dir = _get_project_dir(name)
@@ -238,11 +561,18 @@ def _collect_result_files(run_dir: Path, include_all: bool) -> List[Dict]:
         category = _result_category(rel)
         if not include_all and category is None:
             continue
+        stat = p.stat()
         files.append({
             "name": rel,
             "path": str(p),
             "label": _result_label(rel, category),
-            "size": p.stat().st_size,
+            "size": stat.st_size,
+            # _dedupe_primary_results compares mtimes to keep only the newest
+            # file in singleton categories (krona/stats/coverage). Without this
+            # key it raised KeyError once a sample had 2+ krona files (reruns),
+            # 500-ing the per-sample results endpoint so the GUI showed
+            # "No Kraken results yet" even though the files were on disk.
+            "mtime": stat.st_mtime,
             "openable": _can_open_inline(rel),
             "category": category,
         })
@@ -257,6 +587,7 @@ def _collect_result_files(run_dir: Path, include_all: bool) -> List[Dict]:
 
     files.sort(key=sort_key)
     for f in files:
+        f.pop("mtime", None)
         if include_all and f.get("category") is None:
             f["label"] = f["name"]
     return files
@@ -463,6 +794,36 @@ def api_project_file(name: str, path: str = Query(...), inline: int = 0):
     return FileResponse(target, media_type=media_type, headers=headers)
 
 
+@app.get("/api/taxa")
+def api_get_taxa():
+    """Return the configured taxon search names (config/taxa.yaml)."""
+    return JSONResponse({"taxa": _read_taxa()})
+
+
+class TaxonPayload(BaseModel):
+    name: str
+
+
+@app.post("/api/taxa")
+def api_add_taxon(payload: TaxonPayload):
+    """Append a new taxon search name to config/taxa.yaml (no duplicates).
+
+    Returns the full updated list so the caller can refresh in one round trip.
+    """
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(400, "A taxon name is required.")
+    taxa = _read_taxa()
+    if any(name.lower() == t.lower() for t in taxa):
+        return JSONResponse({"taxa": taxa, "added": False})
+    taxa.append(name)
+    try:
+        _write_taxa(taxa)
+    except OSError as exc:
+        raise HTTPException(500, f"Could not save taxon list: {exc}")
+    return JSONResponse({"taxa": taxa, "added": True})
+
+
 @app.get("/api/config")
 def api_get_config():
     return JSONResponse(load_config())
@@ -480,8 +841,45 @@ def api_save_config(payload: ConfigPayload):
     cfg = load_config()
     updates = payload.model_dump(exclude_none=True)
     cfg.update(updates)
+    # Track recently-used project roots (MRU, max 10) for quick switching.
+    new_root = (updates.get("projects_root") or "").strip()
+    if new_root:
+        recent = [r for r in cfg.get("recent_projects_roots", []) if r != new_root]
+        recent.insert(0, new_root)
+        cfg["recent_projects_roots"] = recent[:10]
     save_config(cfg)
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/browse-dirs")
+def api_browse_dirs(path: str = ""):
+    """List sub-directories of `path` for the project-root folder picker.
+
+    Runs as the OOD session user, so the OS filesystem permissions are the only
+    limit on what can be browsed. Defaults to the user's home when no path is
+    given. Returns the resolved path, its parent (null at the filesystem root),
+    and the immediate sub-directories.
+    """
+    try:
+        p = (Path(path).expanduser() if path.strip() else Path.home()).resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(400, "Invalid path")
+    if not p.is_dir():
+        raise HTTPException(400, f"Not a directory: {p}")
+    entries: List[Dict[str, str]] = []
+    try:
+        for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
+            if child.name.startswith("."):
+                continue
+            try:
+                if child.is_dir():
+                    entries.append({"name": child.name, "path": str(child)})
+            except OSError:
+                continue
+    except PermissionError:
+        raise HTTPException(403, f"Permission denied: {p}")
+    parent = str(p.parent) if p.parent != p else None
+    return JSONResponse({"path": str(p), "parent": parent, "entries": entries})
 
 
 class RunPayload(BaseModel):
@@ -492,6 +890,7 @@ class RunPayload(BaseModel):
     kraken_db: Optional[str] = None
     blast_db: Optional[str] = None
     kraken_only: bool = False   # run only Kraken2 + Krona graph; skip parsing/assembly/BLAST
+    no_blast: bool = False       # run Kraken2 + read parsing only; skip assembly/BLAST/coverage
 
 
 @app.post("/api/run")
@@ -502,11 +901,13 @@ def api_run(payload: RunPayload):
     taxon = (payload.taxon or "").strip()
 
     # Taxon drives the read-parsing/assembly/BLAST identification, which
-    # kraken-only mode skips — so it's only required for a full run.
+    # kraken-only mode skips — so it's only required for runs that parse.
     if not payload.kraken_only and not taxon:
         raise HTTPException(400, "A target taxon is required for a full run.")
     if payload.kraken_only and not kraken_db:
         raise HTTPException(400, "Kraken-only mode requires a Kraken DB path.")
+    if payload.no_blast and not kraken_db:
+        raise HTTPException(400, "Parse-only (skip BLAST) mode requires a Kraken DB path.")
 
     # Validate paths
     r1 = Path(payload.r1)
@@ -556,6 +957,8 @@ def api_run(payload: RunPayload):
         command.extend(["-k", kraken_db])
     if payload.kraken_only:
         command.append("--kraken-only")
+    elif payload.no_blast:
+        command.append("--no-blast")
     elif blast_db:
         command.extend(["-b", blast_db])
 
@@ -565,7 +968,12 @@ def api_run(payload: RunPayload):
         "PYTHONUNBUFFERED": "1",  # belt-and-suspenders with `python -u`
     }
 
-    job_label = "Kraken-only (Krona)" if payload.kraken_only else (taxon or "run")
+    if payload.kraken_only:
+        job_label = "Kraken-only (Krona)"
+    elif payload.no_blast:
+        job_label = f"{taxon} (parse only)" if taxon else "parse only"
+    else:
+        job_label = taxon or "run"
     job_name = f"{payload.project}/{sample_name} — {job_label}"
     job_id = job_manager.start_job(name=job_name, command=command, cwd=run_dir, env=env)
     return JSONResponse({"job_id": job_id, "run_dir": str(run_dir)})

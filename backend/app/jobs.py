@@ -37,6 +37,16 @@ class JobManager:
     def __init__(self, jobs_dir: Path):
         self.jobs_dir = jobs_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        # This dir is shared across all lab users (it lives inside the shared
+        # tool install, not under any one $HOME), so every member must be able
+        # to write job state here. Make it group-writable + setgid so files
+        # created by one user stay group-accessible to the rest. Best-effort:
+        # a user who doesn't own the dir can't chmod it, which is fine — the
+        # owner/admin sets it once and the bit sticks for everyone after.
+        try:
+            os.chmod(self.jobs_dir, 0o2775)
+        except OSError:
+            pass
         self._lock = threading.Lock()
         self._jobs: Dict[str, Dict] = {}
         self._restore_jobs()

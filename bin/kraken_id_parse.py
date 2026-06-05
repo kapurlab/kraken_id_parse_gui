@@ -59,6 +59,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     parser.add_argument("-s", "--specific", action='store', dest='specific', default=None, help='Specify custom script/function for the target being used.  Often just default to the taxon name')
     parser.add_argument('-d', '--debug', action='store_true', dest='debug', default=False, help='keep temp file')
     parser.add_argument('--kraken-only', action='store_true', dest='kraken_only', default=False, help='Run only Kraken2 and produce the Krona graph; skip read parsing, assembly, and BLAST. Requires -k.')
+    parser.add_argument('--no-blast', action='store_true', dest='no_blast', default=False, help='Run Kraken2 and taxonomic read parsing, then stop: skip assembly, BLAST, and coverage. Leaves the parsed FASTQ.gz reads for the target taxon. Requires -k and -t.')
     parser.add_argument('-v', '--version', action='version', version=f'{os.path.basename(__file__)}: version {__version__}')
     args = parser.parse_args()
     
@@ -107,6 +108,14 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     if args.kraken_only and not args.kraken_db:
         print(f"{bcolors.RED}ERROR: --kraken-only requires a Kraken DB (-k/--kraken_db).{bcolors.ENDC}")
         sys.exit(2)
+
+    if args.no_blast:
+        if not args.kraken_db:
+            print(f"{bcolors.RED}ERROR: --no-blast requires a Kraken DB (-k/--kraken_db).{bcolors.ENDC}")
+            sys.exit(2)
+        if not args.taxon:
+            print(f"{bcolors.RED}ERROR: --no-blast requires a target taxon (-t/--taxon).{bcolors.ENDC}")
+            sys.exit(2)
 
     if args.kraken_db:
         kraken = Kraken_Identification(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, kraken_db=args.kraken_db, directory='kraken')
@@ -254,8 +263,22 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             [f"Target taxon not found by Kraken: {args.taxon}"],
         )
         sys.exit(0)
-        
-    
+
+    # --no-blast: the taxonomically-parsed reads are the deliverable. Stop here
+    # before assembly/BLAST/coverage. The gzipped R1/R2 reads for the target
+    # taxon (parser.r1_out.gz / parser.r2_out.gz) are left in place for reuse
+    # (e.g. re-running them through vSNP).
+    if args.no_blast:
+        print(f"\n{bcolors.GREEN}--no-blast mode: extracted target reads "
+              f"({parser.r1_out}.gz, {parser.r2_out}.gz).{bcolors.ENDC}")
+        print(f"{bcolors.GREEN}Skipping assembly, BLAST, and coverage analysis.{bcolors.ENDC}")
+        latex_report.latex_ending()
+        excel_stats.post_excel()
+        cleanup_artifacts()
+        write_structured_reports("completed")
+        print(f"{bcolors.WHITE}Total runtime: {datetime.datetime.now() - start_time}{bcolors.ENDC}\n")
+        sys.exit(0)
+
     # Step 2: Assembly of filtered reads
     print(f"\n{bcolors.BLUE}Step 2: Running assembly of filtered reads...{bcolors.ENDC}")
     assembler = Assemble(

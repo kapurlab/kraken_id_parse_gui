@@ -1,0 +1,30 @@
+# Kraken ID Parse — taxon search names
+#
+# Single source of truth for the "Target Taxon" presets shown in BOTH the
+# Kraken ID Parse GUI and the vSNP GUI. Each entry is a taxonomy
+# classification name passed verbatim to the read parser (-t) and must match
+# the name exactly as Kraken reports it. Plain YAML sequence; add by hand or
+# via the "Add search name" control in either GUI.
+#
+# Syntax: one entry per line as "- Name" — the "- " (dash + SPACE) is required.
+# Without the space the dash becomes part of the name and won't match Kraken.
+
+- Mycobacterium tuberculosis complex
+- Viruses
+- Apicomplexa
+- Retroviridae
+- Flaviviridae
+- Orbivirus
+- Metapneumovirus
+- Poxviridae
+- Adenoviridae
+- Coronaviridae
+- Vesiculovirus
+- Paramyxoviridae
+- Megaviricetes
+- Isavirus salaris
+- Leptospirales
+- Brucellaceae
+- Asfivirus
+- Arteriviridae
+- Novirhabdovirus

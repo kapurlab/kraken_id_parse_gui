@@ -1,0 +1,7 @@
+---
+name: Kraken ID Parse (sandbox)
+description: "Taxonomic classification and contamination screening for WGS samples"
+icon: fa://bacterium
+category: Bioinformatics
+subcategory: Contamination Screening
+role: batch_connect

@@ -26,12 +26,26 @@ dependencies:
   - samtools
   - krona
   - tectonic
+  # Pipeline tools the bin/ scripts shell out to. These are NOT optional — the
+  # GUI's assembly/alignment/QC steps invoke them directly (e.g. fastq_stats_seqkit
+  # calls `seqkit`), so a fresh env without them fails at runtime.
+  - seqkit
+  - blast
+  - bwa
+  - spades
+  - bracken
+  - picard
+  - freebayes
+  - vcflib
+  - parallel
+  - pigz
 
   # Analysis and data packages
   - scikit-allel
   - openpyxl
   - h5py
   - dask
+  - humanize          # fastq_stats_seqkit.py imports this at module load
 
   # Web backend (FastAPI serves the GUI under OOD)
   - fastapi>=0.115.0
@@ -42,6 +56,3 @@ dependencies:
   - pip:
       - PyVCF3>=1.0.0  # VCF file handling
       - pydantic>=2.0.0
-
-# Note: Additional bioinformatics tools can be added after initial setup:
-# conda install -n kraken_id_parse -c conda-forge -c bioconda blast bwa spades seqkit bracken picard vcflib freebayes parallel pigz

@@ -46,6 +46,12 @@ dependencies:
   - h5py
   - dask
   - humanize          # fastq_stats_seqkit.py imports this at module load
+  - pysam             # coverage_graph.py (unguarded import)
+  - pyyaml            # run_with_config.py (unguarded import)
+  # Banner/report image generation (file_setup.py raises if these are absent).
+  - svgwrite
+  - cairosvg
+  - pillow
 
   # Web backend (FastAPI serves the GUI under OOD)
   - fastapi>=0.115.0

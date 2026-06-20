@@ -66,6 +66,8 @@ export default function App() {
   const [krakenOnly, setKrakenOnly] = useState(false);   // Kraken2 + Krona only, no read parsing
   const [noBlast, setNoBlast] = useState(false);         // Kraken2 + read parsing only, no assembly/BLAST
   const [krakenDb, setKrakenDb] = useState("");
+  const [krakenDbs, setKrakenDbs] = useState([]);        // discovered Kraken2 DBs (dropdown)
+  const [krakenDbCustom, setKrakenDbCustom] = useState(false); // "Custom path…" chosen
   const [blastDb, setBlastDb] = useState("nt");
   const [running, setRunning] = useState(false);
   const [jobId, setJobId] = useState(null);
@@ -94,6 +96,10 @@ export default function App() {
         setBlastDb(cfg.blast_db || "nt");
         setSettingsDraft(cfg);
       })
+      .catch(() => {});
+    fetch("./api/kraken-dbs")
+      .then((r) => r.json())
+      .then((d) => setKrakenDbs(Array.isArray(d.databases) ? d.databases : []))
       .catch(() => {});
     fetch("./api/taxa")
       .then((r) => r.json())
@@ -631,13 +637,46 @@ export default function App() {
           <div className="row-grid row-grid-single">
             <section className="panel">
               <div className="form-section">
-                <label className="form-label">Kraken2 database path</label>
-                <input
-                  placeholder="/srv/kapurlab/databases/kraken2/k2_standard"
-                  value={settingsDraft.kraken_db || ""}
-                  onChange={(e) => setSettingsDraft((d) => ({ ...d, kraken_db: e.target.value }))}
-                />
-                <div className="form-hint">Directory containing hash.k2d, opts.k2d, taxo.k2d</div>
+                <label className="form-label">Kraken2 database</label>
+                {(() => {
+                  const cur = settingsDraft.kraken_db || "";
+                  const paths = krakenDbs.map((db) => db.path);
+                  const matched = paths.includes(cur);
+                  // Show the free-text box when the user picked "Custom…", when
+                  // the saved path isn't among the discovered DBs, or when none
+                  // were discovered (graceful fallback to the old behavior).
+                  const showCustom = krakenDbCustom || (cur !== "" && !matched) || krakenDbs.length === 0;
+                  const gb = (b) => (b >= 1073741824 ? `${(b / 1073741824).toFixed(b < 10 * 1073741824 ? 1 : 0)} GB` : `${Math.round(b / 1048576)} MB`);
+                  return (
+                    <>
+                      <select
+                        value={showCustom ? "__custom__" : cur}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === "__custom__") { setKrakenDbCustom(true); }
+                          else { setKrakenDbCustom(false); setSettingsDraft((d) => ({ ...d, kraken_db: v })); }
+                        }}
+                      >
+                        {!showCustom && !matched && <option value="">— select a database —</option>}
+                        {krakenDbs.map((db) => (
+                          <option key={db.path} value={db.path}>
+                            {db.name}{db.size_bytes ? ` (${gb(db.size_bytes)})` : ""}
+                          </option>
+                        ))}
+                        <option value="__custom__">Custom path…</option>
+                      </select>
+                      {showCustom && (
+                        <input
+                          style={{ marginTop: 6 }}
+                          placeholder="/srv/kapurlab/databases/kraken2/k2_standard_08gb"
+                          value={settingsDraft.kraken_db || ""}
+                          onChange={(e) => setSettingsDraft((d) => ({ ...d, kraken_db: e.target.value }))}
+                        />
+                      )}
+                    </>
+                  );
+                })()}
+                <div className="form-hint">Directory containing hash.k2d, opts.k2d, taxo.k2d. Pick a discovered database, or "Custom path…" to enter one.</div>
               </div>
               <div className="form-section">
                 <label className="form-label">BLAST database path or name</label>

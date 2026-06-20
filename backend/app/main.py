@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config import load_config, save_config
+from .config import DEFAULTS, load_config, save_config
 from .jobs import JobManager
 from .sra import (
     SRAExpansionError,
@@ -853,6 +853,54 @@ def api_add_taxon(payload: TaxonPayload):
 @app.get("/api/config")
 def api_get_config():
     return JSONResponse(load_config())
+
+
+@app.get("/api/kraken-dbs")
+def api_kraken_dbs():
+    """Discover installed Kraken2 databases for the settings dropdown.
+
+    A valid Kraken2 DB is a directory containing ``hash.k2d``. Scan the parent
+    dir(s) of the configured + default ``kraken_db`` (conventionally
+    ``/srv/kapurlab/databases/kraken2/``) and list each DB with its on-disk
+    size. The free-text "custom path" field stays available for DBs outside
+    these roots.
+    """
+    cfg = load_config()
+    current = (cfg.get("kraken_db") or "").strip()
+    roots: List[Path] = []
+    for cand in (current, DEFAULTS.get("kraken_db", "")):
+        if cand:
+            roots.append(Path(cand).parent)
+    dbs: List[Dict[str, Any]] = []
+    seen_roots: set = set()
+    seen_dbs: set = set()
+    for root in roots:
+        rkey = str(root)
+        if rkey in seen_roots:
+            continue
+        seen_roots.add(rkey)
+        if not root.is_dir():
+            continue
+        try:
+            children = sorted(root.iterdir())
+        except OSError:
+            continue
+        for d in children:
+            try:
+                if not d.is_dir() or not (d / "hash.k2d").is_file():
+                    continue
+                rp = str(d.resolve())
+            except OSError:
+                continue
+            if rp in seen_dbs:
+                continue
+            seen_dbs.add(rp)
+            try:
+                size = sum(f.stat().st_size for f in d.glob("*.k2d"))
+            except OSError:
+                size = 0
+            dbs.append({"name": d.name, "path": str(d), "size_bytes": size})
+    return JSONResponse({"databases": dbs, "current": current})
 
 
 class ConfigPayload(BaseModel):

@@ -3,3 +3,7 @@
 env/
 __pycache__/
 backend/jobs/
+
+# internal dev handoff / session notes — not for the public repo
+HANDOFF*.md
+*_HANDOFF.md

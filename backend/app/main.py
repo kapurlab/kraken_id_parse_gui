@@ -147,6 +147,32 @@ def _safe_mtime(p: Path) -> float:
         return 0
 
 
+def _count_project_reads(download_dir: Path, step1_dir: Path) -> int:
+    """Count input read files (*.fastq.gz) across download/ and step1/.
+
+    Native projects keep reads in download/; vSNP/Roar-imported projects keep
+    them in step1/<sample>/ (and may symlink them into download/). Count the
+    union, deduped by resolved path (so a download/ symlink pointing at a step1
+    read isn't double-counted), skipping *_unmapped_* (the unmapped-read subset
+    vSNP3 emits alongside the real reads — not an input read set). step1 is
+    globbed one level deep (reads live directly under each sample dir)."""
+    seen: set = set()
+    candidates = []
+    if download_dir.is_dir():
+        candidates += download_dir.rglob("*.fastq.gz")
+    if step1_dir.is_dir():
+        candidates += step1_dir.glob("*/*.fastq.gz")
+    for f in candidates:
+        if "_unmapped_" in f.name:
+            continue
+        try:
+            key = f.resolve()
+        except OSError:
+            key = f
+        seen.add(key)
+    return len(seen)
+
+
 def _list_projects_from_root(root: Path, scope: str) -> List[Dict]:
     if not root.is_dir():
         return []
@@ -163,7 +189,7 @@ def _list_projects_from_root(root: Path, scope: str) -> List[Dict]:
             continue
         download_dir = p / "download"
         try:
-            fastq_count = len(list(download_dir.rglob("*.fastq.gz"))) if download_dir.is_dir() else 0
+            fastq_count = _count_project_reads(download_dir, p / "step1")
         except PermissionError:
             fastq_count = -1  # signals "no access" to frontend
         kraken_runs = []

@@ -128,10 +128,20 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             print(f"\n{bcolors.GREEN}Kraken-only mode: Krona graph generated at {krona_html}.{bcolors.ENDC}")
             print(f"{bcolors.GREEN}Skipping Bracken, read parsing, assembly, and BLAST.{bcolors.ENDC}")
             sys.exit(0)
-        kraken.bracken(kraken.report, kraken.output)
-        bracken_pie_charts = Bracken_Pie_Charts()
-        bracken_pie_charts.run(kraken.bracken_excel)
-        bracken_pie_charts.latex(build_latex=latex_report.tex)
+        # Bracken re-estimates abundances but has no macOS/arm64 conda build, so
+        # the binary may be absent. It's optional (kraken-only mode already skips
+        # it) — when it's not on PATH, warn and skip Bracken + its pie charts
+        # instead of crashing, so read parsing/identification still runs.
+        if shutil.which("bracken"):
+            kraken.bracken(kraken.report, kraken.output)
+            bracken_pie_charts = Bracken_Pie_Charts()
+            bracken_pie_charts.run(kraken.bracken_excel)
+            bracken_pie_charts.latex(build_latex=latex_report.tex)
+        else:
+            print(f"{bcolors.YELLOW}WARNING: bracken not found on PATH — skipping "
+                  f"Bracken abundance re-estimation and its pie charts "
+                  f"(no macOS build). Read parsing and identification continue."
+                  f"{bcolors.ENDC}")
     else:
         class Kraken:
             def __init__(self):

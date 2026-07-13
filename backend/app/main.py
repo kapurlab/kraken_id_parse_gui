@@ -348,6 +348,36 @@ def _list_fastq_pairs(download_dir: Path) -> List[Dict]:
     return pairs
 
 
+def _list_project_samples(project_dir: Path) -> List[Dict]:
+    """Enumerate a project's samples from BOTH download/ and step1/.
+
+    download/ is the canonical FASTQ location (SRA/upload land here) and wins on
+    dedup. But the vSNP GUI also stages samples as step1/<sample>/ subfolders —
+    e.g. folders dragged/placed into a project outside the download flow — whose
+    FASTQs never appear in download/. vSNP lists those; without this, the Kraken
+    GUI wouldn't, so a sample visible in one tool was invisible in the other.
+    step1 FASTQs are symlinks that resolve to real files, so the r1/r2 paths
+    returned here are directly runnable via /api/run.
+    """
+    download_dir = project_dir / "download"
+    pairs = _list_fastq_pairs(download_dir) if download_dir.is_dir() else []
+    seen = {p["sample"] for p in pairs}
+
+    step1_dir = project_dir / "step1"
+    if step1_dir.is_dir():
+        for sub in sorted(step1_dir.iterdir()):
+            if not sub.is_dir() or sub.name.startswith(("_", ".")):
+                continue
+            for p in _list_fastq_pairs(sub):
+                if p["sample"] in seen:
+                    continue
+                p["source"] = "step1"
+                seen.add(p["sample"])
+                pairs.append(p)
+
+    return pairs
+
+
 # ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
@@ -537,10 +567,7 @@ def api_project_samples(name: str):
     project_dir = _get_project_dir(name)
     if project_dir is None:
         raise HTTPException(404, f"Project not found: {name}")
-    download_dir = project_dir / "download"
-    if not download_dir.is_dir():
-        return JSONResponse([])
-    return JSONResponse(_list_fastq_pairs(download_dir))
+    return JSONResponse(_list_project_samples(project_dir))
 
 
 # ---------------------------------------------------------------------------

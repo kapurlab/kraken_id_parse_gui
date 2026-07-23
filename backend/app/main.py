@@ -26,13 +26,13 @@ from typing import Any, Dict, List, Optional
 
 import aiofiles
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import load_config, save_config
 from .jobs import JobManager
+from .request_safety import install_request_safety
 from .sra import (
     SRAExpansionError,
     build_download_script,
@@ -123,12 +123,7 @@ def _write_taxa(taxa: List[str]) -> None:
 # App & job manager
 # ---------------------------------------------------------------------------
 app = FastAPI(title="Kraken ID Parse GUI")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+install_request_safety(app)
 
 job_manager = JobManager(_JOBS_DIR)
 

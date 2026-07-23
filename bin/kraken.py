@@ -27,9 +27,12 @@ class Kraken_Identification(Setup):
 
         Setup.__init__(self, FASTA=FASTA, FASTQ_R1=FASTQ_R1, FASTQ_R2=FASTQ_R2, debug=debug)
         self.directory = directory
-        self.influenza = influenza
         if influenza:
-            self.kraken_db = "/project/bioinformatic_databases/databases/kraken/flu_jhu"
+            raise ValueError(
+                "the legacy Kraken1/JHU influenza mode is no longer supported; "
+                "use the IRMA or GenoFLU GUI for influenza analysis"
+            )
+        self.influenza = False
         if kraken_db:
             self.kraken_db = kraken_db
         
@@ -41,26 +44,12 @@ class Kraken_Identification(Setup):
         FASTQ_list = self.FASTQ_list
         FASTA =  self.FASTA
         cwd = self.cwd
-        if self.influenza: #Need to run JHU database using Kraken1
-            if len(FASTQ_list) == 2:
-                os.system(f'kraken --db {self.kraken_db} --paired {FASTQ_list[0]} {FASTQ_list[1]} > {sample_name}_outputkraken.txt')
-            elif len(FASTQ_list) == 1:
-                os.system(f'kraken --db {self.kraken_db} {FASTQ_list[0]} > {sample_name}_outputkraken.txt')
-            else:
-                os.system(f'kraken --db {self.kraken_db} {FASTA} > {sample_name}_outputkraken.txt')
-            os.system(f'kraken-report --db {self.kraken_db} {sample_name}_outputkraken.txt > {sample_name}_reportkraken.txt')
-            os.system(f'dvl_krakenreport2krona.sh -i {sample_name}_reportkraken.txt -k {self.kraken_db} -t {sample_name}-jhu-output.txt -o {sample_name}-jhu-Krona_id_graphic.html')
-            if not os.path.exists(self.directory):
-                os.mkdir(self.directory)
-            shutil.move(f'{sample_name}-jhu-Krona_id_graphic.html', self.directory)
-            os.remove(f'{sample_name}-jhu-output.txt')
+        if len(FASTQ_list) == 2:
+            os.system(f'kraken2 --db {kraken_db} --threads {cpus} --paired {FASTQ_list[0]} {FASTQ_list[1]} --output {sample_name}_outputkraken.txt --report {sample_name}_reportkraken.txt')
+        elif len(FASTQ_list) == 1:
+            os.system(f'kraken2 --db {kraken_db} --threads {cpus} {FASTQ_list[0]} --output {sample_name}_outputkraken.txt --report {sample_name}_reportkraken.txt')
         else:
-            if len(FASTQ_list) == 2:
-                os.system(f'kraken2 --db {kraken_db} --threads {cpus} --paired {FASTQ_list[0]} {FASTQ_list[1]} --output {sample_name}_outputkraken.txt --report {sample_name}_reportkraken.txt')
-            elif len(FASTQ_list) == 1:
-                os.system(f'kraken2 --db {kraken_db} --threads {cpus} {FASTQ_list[0]} --output {sample_name}_outputkraken.txt --report {sample_name}_reportkraken.txt')
-            else:
-                os.system(f'kraken2 --db {kraken_db} --threads {cpus} {FASTA} --output {sample_name}_outputkraken.txt --report {sample_name}_reportkraken.txt')
+            os.system(f'kraken2 --db {kraken_db} --threads {cpus} {FASTA} --output {sample_name}_outputkraken.txt --report {sample_name}_reportkraken.txt')
 
         if os.path.exists(f'{cwd}/{sample_name}_outputkraken.txt'):
             output = f'{cwd}/{sample_name}_outputkraken.txt'
@@ -185,10 +174,18 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     parser.add_argument('-r1', '--FASTQ_R1', action='store', dest='FASTQ_R1', required=False, help='Provide R1 FASTQ gz file, or single read')
     parser.add_argument('-r2', '--FASTQ_R2', action='store', dest='FASTQ_R2', required=False, default=None, help='Provide R2 FASTQ gz file')
     parser.add_argument('-y', '--directory', action='store', dest='directory', required=False, default="kraken", help='Put output to directory')
-    parser.add_argument('-i', '--influenza', action='store_true', dest='influenza', default=False, help='Use JHU influenza specific database')
+    parser.add_argument(
+        '-i', '--influenza', action='store_true', dest='influenza', default=False,
+        help='deprecated: use the IRMA or GenoFLU GUI for influenza analysis',
+    )
     parser.add_argument('-d', '--debug', action='store_true', dest='debug', default=False, help='keep temp file')
     parser.add_argument('-v', '--version', action='version', version=f'{os.path.basename(__file__)}: version {__version__}')
     args = parser.parse_args()
+    if args.influenza:
+        parser.error(
+            "the legacy Kraken1/JHU influenza mode is no longer supported; "
+            "use the IRMA or GenoFLU GUI"
+        )
 
     print(f'\n{os.path.basename(__file__)} SET ARGUMENTS:')
     print(args)

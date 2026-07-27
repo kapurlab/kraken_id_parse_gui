@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import ThemeToggle from "./ThemeToggle";
+import CitationFooter from "./Citations";
 import ResultsPane from "./ResultsPane";
 import { useResults } from "./useResults";
 
@@ -1376,6 +1377,8 @@ export default function App() {
           </div>
         )}
       </main>
+
+      <CitationFooter tool="kraken_id_parse_gui" />
 
       {folderBrowser.open && (
         <div

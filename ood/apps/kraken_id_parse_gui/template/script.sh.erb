@@ -25,6 +25,14 @@ fi
 # Tool source (shared install only — no per-user fallback for the app itself)
 KRAKEN_GUI=/srv/kapurlab/tools/kraken_id_parse_gui
 
+# Tell the backend where THIS deployment keeps its shared data, so the tool code
+# does not have to contain a path. These are the only site-specific values here
+# besides the install paths above, and `bdtools install --server` rewrites them
+# from the site config when it renders this file — a card is a per-site artifact,
+# which is exactly where a site path belongs.
+export BDTOOLS_DB_ROOT="${BDTOOLS_DB_ROOT:-/srv/kapurlab/databases}"
+export BDTOOLS_SHARED_PROJECTS_ROOT="${BDTOOLS_SHARED_PROJECTS_ROOT:-/srv/kapurlab/projects}"
+
 # Add the conda env bin and the kraken bin/ scripts to PATH
 export PATH="${KRAKEN_ENV}/bin:${PATH}"
 # PYTHONPATH lets the kraken CLI scripts find each other (local imports in bin/)

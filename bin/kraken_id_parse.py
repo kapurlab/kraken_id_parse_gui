@@ -180,9 +180,12 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         # instead of crashing, so read parsing/identification still runs.
         if shutil.which("bracken"):
             kraken.bracken(kraken.report, kraken.output)
-            bracken_pie_charts = Bracken_Pie_Charts()
-            bracken_pie_charts.run(kraken.bracken_excel)
-            bracken_pie_charts.latex(build_latex=latex_report.tex)
+            # bracken() skips itself (bracken_excel=None) when bracken fails —
+            # e.g. a DB without kmer distributions or a near-empty classification.
+            if kraken.bracken_excel:
+                bracken_pie_charts = Bracken_Pie_Charts()
+                bracken_pie_charts.run(kraken.bracken_excel)
+                bracken_pie_charts.latex(build_latex=latex_report.tex)
         else:
             print(f"{bcolors.YELLOW}WARNING: bracken not found on PATH — skipping "
                   f"Bracken abundance re-estimation and its pie charts "

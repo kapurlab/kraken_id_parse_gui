@@ -204,6 +204,7 @@ class Kraken_Identification(Setup):
                 os.remove(dst)
             shutil.move(f'{self.sample_name}_{self.date_stamp}_krona.html', self.directory)
             self.krona_html = f'{self.cwd}/{self.directory}/{self.sample_name}_{self.date_stamp}_krona.html'
+        return self.krona_html
             
     def bracken(self, report, output):
         rc = subprocess.call(f'bracken -d {self.kraken_db} -i {report} -o {self.sample_name}-bracken.txt -r 250', shell=True)

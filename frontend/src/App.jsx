@@ -8,7 +8,7 @@ import { useResults } from "./useResults";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const APP_VERSION = "0.2.5";
+const APP_VERSION = "0.2.6";
 
 // Taxon presets are loaded at runtime from the shared config/taxa.yaml via
 // /api/taxa. This fallback is only used if that fetch fails.

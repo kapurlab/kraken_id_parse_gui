@@ -51,8 +51,15 @@ _REPO_ROOT = _HERE.parent.parent          # /srv/kapurlab/tools/kraken_id_parse_
 _BIN_DIR = _REPO_ROOT / "bin"
 _FRONTEND_DIST = _REPO_ROOT / "frontend" / "dist"
 
-# Shared project root
-_SHARED_PROJECTS = Path("/srv/kapurlab/projects")
+# Shared project root — resolved by config.py from the launcher's env
+# (BDTOOLS_SHARED_PROJECTS_ROOT), "" when this deployment has none. Keep a
+# definitely-nonexistent placeholder when unset so the listing loops skip it
+# without special cases.
+_SHARED_PROJECTS = (
+    Path(DEFAULTS["shared_projects_root"])
+    if DEFAULTS.get("shared_projects_root")
+    else Path.home() / ".local" / "share" / "kraken_id_parse_gui" / "no-shared-projects"
+)
 
 # Jobs log directory (inside repo so it survives across sessions)
 _JOBS_DIR = _REPO_ROOT / "backend" / "jobs"
@@ -879,20 +886,26 @@ def api_get_config():
 
 @app.get("/api/kraken-dbs")
 def api_kraken_dbs():
-    """Discover installed Kraken2 databases for the settings dropdown.
+    """Kraken2 databases for the settings/run dropdowns: every path the user
+    has saved (``saved_kraken_dbs``, removable in Settings) plus anything
+    discovered on disk.
 
-    A valid Kraken2 DB is a directory containing ``hash.k2d``. Scan the parent
-    dir(s) of the configured + default ``kraken_db`` (conventionally
-    ``/srv/kapurlab/databases/kraken2/``) and list each DB with its on-disk
-    size. The free-text "custom path" field stays available for DBs outside
+    A valid Kraken2 DB is a directory containing ``hash.k2d``. Discovery scans
+    the parent dir(s) of the configured/saved DBs and the site database root
+    (BDTOOLS_DB_ROOT env, exported by bdtools launches) — never a baked-in
+    path. The free-text "custom path" field stays available for DBs outside
     these roots.
     """
     cfg = load_config()
     current = (cfg.get("kraken_db") or "").strip()
+    saved = [str(p).strip() for p in (cfg.get("saved_kraken_dbs") or []) if str(p).strip()]
     roots: List[Path] = []
-    for cand in (current, DEFAULTS.get("kraken_db", "")):
+    for cand in (current, DEFAULTS.get("kraken_db", ""), *saved):
         if cand:
             roots.append(Path(cand).parent)
+    db_root_env = os.environ.get("BDTOOLS_DB_ROOT", "").strip()
+    if db_root_env:
+        roots.append(Path(db_root_env) / "kraken2")
     dbs: List[Dict[str, Any]] = []
     seen_roots: set = set()
     seen_dbs: set = set()
@@ -922,7 +935,39 @@ def api_kraken_dbs():
             except OSError:
                 size = 0
             dbs.append({"name": d.name, "path": str(d), "size_bytes": size})
-    return JSONResponse({"databases": dbs, "current": current})
+    # Saved entries the scan didn't reach (moved DB, unmounted share) still
+    # appear — flagged missing — so the user can see and remove them.
+    for p in saved:
+        try:
+            rp = str(Path(p).resolve())
+        except OSError:
+            rp = p
+        if rp in seen_dbs or p in seen_dbs:
+            continue
+        seen_dbs.add(rp)
+        dbs.append({
+            "name": Path(p).name,
+            "path": p,
+            "size_bytes": 0,
+            "missing": not (Path(p) / "hash.k2d").is_file(),
+        })
+    return JSONResponse({"databases": dbs, "current": current, "saved": saved})
+
+
+def _remember_kraken_db(cfg: Dict[str, Any], db_path: str) -> bool:
+    """Add a Kraken DB path to the remembered list (saved_kraken_dbs) so
+    switching databases later is a pick, not a re-type. Returns True if the
+    config changed. Only real DBs are remembered — a typo'd path should fail
+    its run, not haunt the dropdown forever."""
+    db_path = (db_path or "").strip()
+    if not db_path or not (Path(db_path) / "hash.k2d").is_file():
+        return False
+    saved = [str(p).strip() for p in (cfg.get("saved_kraken_dbs") or []) if str(p).strip()]
+    if db_path in saved:
+        return False
+    saved.append(db_path)
+    cfg["saved_kraken_dbs"] = saved
+    return True
 
 
 class ConfigPayload(BaseModel):
@@ -931,6 +976,7 @@ class ConfigPayload(BaseModel):
     projects_root: Optional[str] = None
     shared_projects_root: Optional[str] = None
     saved_project_roots: Optional[List[str]] = None
+    saved_kraken_dbs: Optional[List[str]] = None
 
 
 @app.post("/api/config")
@@ -947,6 +993,17 @@ def api_save_config(payload: ConfigPayload):
             if r and r not in seen:
                 seen.add(r); cleaned.append(r)
         cfg["saved_project_roots"] = cleaned
+    # Same for the remembered Kraken DBs, and auto-remember the active one so
+    # every DB ever configured here stays one dropdown pick away.
+    dbs = cfg.get("saved_kraken_dbs")
+    if isinstance(dbs, list):
+        seen, cleaned = set(), []
+        for r in dbs:
+            r = (str(r) or "").strip()
+            if r and r not in seen:
+                seen.add(r); cleaned.append(r)
+        cfg["saved_kraken_dbs"] = cleaned
+    _remember_kraken_db(cfg, cfg.get("kraken_db", ""))
     save_config(cfg)
     return JSONResponse({"ok": True})
 
@@ -999,6 +1056,10 @@ def api_run(payload: RunPayload):
     kraken_db = payload.kraken_db or cfg.get("kraken_db", "")
     blast_db = payload.blast_db or cfg.get("blast_db", "nt")
     taxon = (payload.taxon or "").strip()
+    # Remember any DB actually run with, so it's a dropdown pick next time —
+    # including ad-hoc per-run overrides typed into the run form.
+    if _remember_kraken_db(cfg, kraken_db):
+        save_config(cfg)
 
     # Taxon drives the read-parsing/assembly/BLAST identification, which
     # kraken-only mode skips — so it's only required for runs that parse.

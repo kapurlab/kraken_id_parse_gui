@@ -32,6 +32,14 @@ _DB_SUBPATHS = {
     "blast_db": "blast/ref_prok_rep_genomes",
 }
 
+# The literals those defaults were before they became env-derived. Kept ONLY to
+# recognize and heal configs that inherited them via first-run persistence on
+# machines where they never existed (see load_config).
+_STALE_DB_DEFAULTS = {
+    "kraken_db": "/srv/kapurlab/databases/kraken2/k2_standard_08gb",
+    "blast_db": "/srv/kapurlab/databases/blast/ref_prok_rep_genomes",
+}
+
 
 def _default_db(key: str) -> str:
     """A default only when we can point at something real.
@@ -59,6 +67,11 @@ DEFAULTS: Dict[str, Any] = {
     "saved_project_roots": [],
     "kraken_db": _default_db("kraken_db"),
     "blast_db": _default_db("blast_db"),
+    # Every Kraken2 DB the user has pointed this tool at, so switching between
+    # databases is a dropdown pick instead of re-typing paths. kraken_db is the
+    # active one; entries are removable in Settings. The vSNP GUI reads this
+    # same list to offer per-run DB switching.
+    "saved_kraken_dbs": [],
 }
 
 
@@ -70,6 +83,18 @@ def load_config() -> Dict[str, Any]:
         cfg = json.load(f)
     for k, v in DEFAULTS.items():
         cfg.setdefault(k, v)
+    # Heal configs that inherited the era of hard-coded DB defaults on a machine
+    # where they never existed: they were written by this tool's own first-run
+    # persistence, not chosen by the user, so blanking them is a correction — a
+    # path the user really typed is left alone even if currently unreachable.
+    changed = False
+    for key, stale in _STALE_DB_DEFAULTS.items():
+        val = str(cfg.get(key, "") or "").strip()
+        if val == stale and not Path(stale).parent.is_dir():
+            cfg[key] = ""
+            changed = True
+    if changed:
+        save_config(cfg)
     return cfg
 
 

@@ -8,7 +8,7 @@ import { useResults } from "./useResults";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const APP_VERSION = "0.2.0";
+const APP_VERSION = "0.2.4";
 
 // Taxon presets are loaded at runtime from the shared config/taxa.yaml via
 // /api/taxa. This fallback is only used if that fetch fails.
@@ -86,6 +86,10 @@ export default function App() {
   const [noBlast, setNoBlast] = useState(false);         // Kraken2 + read parsing only, no assembly/BLAST
   const [krakenDb, setKrakenDb] = useState("");
   const [blastDb, setBlastDb] = useState("nt");
+  // Known Kraken2 DBs — remembered (saved_kraken_dbs) + discovered on disk —
+  // from /api/kraken-dbs. Powers the quick-switch dropdowns in Settings and
+  // the run form.
+  const [knownDbs, setKnownDbs] = useState([]);   // [{name, path, size_bytes, missing?}]
   const [running, setRunning] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [jobStatus, setJobStatus] = useState("idle"); // idle | running | succeeded | failed
@@ -114,6 +118,7 @@ export default function App() {
         setSettingsDraft(cfg);
       })
       .catch(() => {});
+    loadKnownDbs();
     fetch("./api/taxa")
       .then((r) => r.json())
       .then((d) => {
@@ -554,6 +559,13 @@ export default function App() {
     setFolderBrowser((s) => ({ ...s, open: false }));
   }
 
+  function loadKnownDbs() {
+    fetch("./api/kraken-dbs")
+      .then((r) => (r.ok ? r.json() : { databases: [] }))
+      .then((data) => setKnownDbs(data.databases || []))
+      .catch(() => {});
+  }
+
   function saveSettings() {
     fetch("./api/config", {
       method: "POST",
@@ -563,13 +575,34 @@ export default function App() {
         blast_db: settingsDraft.blast_db,
         projects_root: settingsDraft.projects_root,
         saved_project_roots: settingsDraft.saved_project_roots,
+        saved_kraken_dbs: settingsDraft.saved_kraken_dbs,
       }),
     })
       .then((r) => r.json())
       .then(() => {
         setKrakenDb(settingsDraft.kraken_db || "");
         setBlastDb(settingsDraft.blast_db || "nt");
+        loadKnownDbs();
         loadProjects();
+      })
+      .catch(() => {});
+  }
+
+  // Remove a remembered Kraken DB. If it was the active one, the active DB is
+  // cleared too — a removed database shouldn't stay silently selected.
+  function removeSavedDb(p) {
+    const nextSaved = (settingsDraft.saved_kraken_dbs || []).filter((d) => d !== p);
+    const nextActive = (settingsDraft.kraken_db || "") === p ? "" : settingsDraft.kraken_db;
+    const merged = { ...settingsDraft, saved_kraken_dbs: nextSaved, kraken_db: nextActive };
+    setSettingsDraft(merged);
+    fetch("./api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ saved_kraken_dbs: nextSaved, kraken_db: nextActive }),
+    })
+      .then(() => {
+        setKrakenDb(nextActive || "");
+        loadKnownDbs();
       })
       .catch(() => {});
   }
@@ -709,13 +742,46 @@ export default function App() {
           <div className="row-grid row-grid-single">
             <section className="panel">
               <div className="form-section">
-                <label className="form-label">Kraken2 database path</label>
+                <label className="form-label">Kraken2 database</label>
+                {knownDbs.length ? (
+                  <select
+                    value={knownDbs.some((d) => d.path === (settingsDraft.kraken_db || "")) ? settingsDraft.kraken_db : ""}
+                    onChange={(e) => { if (e.target.value) setSettingsDraft((d) => ({ ...d, kraken_db: e.target.value })); }}
+                    style={{ marginBottom: 6 }}
+                  >
+                    <option value="">— pick a known database —</option>
+                    {knownDbs.map((d) => (
+                      <option key={d.path} value={d.path}>
+                        {d.name}{d.size_bytes ? ` (${(d.size_bytes / 1073741824).toFixed(1)} GB)` : ""}{d.missing ? " ⚠ missing" : ""} — {d.path}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
                 <input
-                  placeholder="/srv/kapurlab/databases/kraken2/k2_standard"
+                  placeholder="/path/to/kraken2_db  (directory containing hash.k2d)"
                   value={settingsDraft.kraken_db || ""}
                   onChange={(e) => setSettingsDraft((d) => ({ ...d, kraken_db: e.target.value }))}
                 />
-                <div className="form-hint">Directory containing hash.k2d, opts.k2d, taxo.k2d</div>
+                <div className="form-hint">
+                  Directory containing hash.k2d, opts.k2d, taxo.k2d. Every database you use is remembered below for quick switching.
+                </div>
+                {(settingsDraft.saved_kraken_dbs || []).length ? (
+                  <div style={{ marginTop: 6 }}>
+                    <label className="form-label">Remembered databases</label>
+                    {(settingsDraft.saved_kraken_dbs || []).map((p) => (
+                      <div key={p} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginBottom: 3 }}>
+                        <span style={{ flex: 1, wordBreak: "break-all", opacity: p === settingsDraft.kraken_db ? 1 : 0.8 }}>
+                          {p}{p === settingsDraft.kraken_db ? "  ← active" : ""}
+                        </span>
+                        <button type="button" className="ghost" title="Use this database"
+                          onClick={() => setSettingsDraft((d) => ({ ...d, kraken_db: p }))}
+                          disabled={p === settingsDraft.kraken_db}>Use</button>
+                        <button type="button" className="ghost" title="Forget this database (does not delete anything on disk)"
+                          onClick={() => removeSavedDb(p)}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
               <div className="form-section">
                 <label className="form-label">BLAST database path or name</label>
@@ -750,7 +816,7 @@ export default function App() {
                       disabled={!(settingsDraft.saved_project_roots || []).includes(settingsDraft.projects_root)}>Remove</button>
                   </span>
                 </div>
-                <div className="form-hint">New projects are created under this root. Shared projects at /srv/kapurlab/projects/ are always visible. Click Save to apply.</div>
+                <div className="form-hint">New projects are created under this root. Projects in the site’s shared projects folder are always visible. Click Save to apply.</div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
                 <button onClick={saveSettings}>Save</button>
@@ -1064,7 +1130,7 @@ export default function App() {
                       {/* Import from a server path */}
                       <div className="row" style={{ margin: 0 }}>
                         <input
-                          placeholder="/srv/kapurlab/… folder or .fastq.gz file"
+                          placeholder="/path/to/folder or .fastq.gz file"
                           value={addPath[activeProject] || ""}
                           onChange={(e) => setAddPath((m) => ({ ...m, [activeProject]: e.target.value }))}
                           onKeyDown={(e) => { if (e.key === "Enter") linkLocal(activeProject); }}
@@ -1239,7 +1305,7 @@ export default function App() {
                   </button>
                 </div>
                 <div className="note" style={{ marginTop: 4 }}>
-                  New taxa are saved to the shared list (/srv/kapurlab/tools/kraken_id_parse_gui/config/taxa.yaml) and appear in this dropdown and the vSNP GUI.
+                  New taxa are saved to the shared list (this install’s config/taxa.yaml) and appear in this dropdown and the vSNP GUI.
                 </div>
               </div>
 
@@ -1248,8 +1314,23 @@ export default function App() {
                   Kraken2 DB path
                   {!krakenDb && <span style={{ color: "var(--danger)", marginLeft: 6, fontSize: 11 }}>⚠ not configured</span>}
                 </label>
+                {knownDbs.length ? (
+                  <select
+                    value={knownDbs.some((d) => d.path === krakenDb) ? krakenDb : ""}
+                    onChange={(e) => { if (e.target.value) setKrakenDb(e.target.value); }}
+                    disabled={running}
+                    style={{ marginBottom: 6 }}
+                  >
+                    <option value="">— switch to a remembered database —</option>
+                    {knownDbs.map((d) => (
+                      <option key={d.path} value={d.path}>
+                        {d.name}{d.missing ? " ⚠ missing" : ""} — {d.path}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
                 <input
-                  placeholder="/srv/kapurlab/databases/kraken2/k2_standard"
+                  placeholder="/path/to/kraken2_db  (directory containing hash.k2d)"
                   value={krakenDb}
                   onChange={(e) => setKrakenDb(e.target.value)}
                   disabled={running}
@@ -1259,7 +1340,7 @@ export default function App() {
               <div className="form-section">
                 <label className="form-label">BLAST DB path (or name)</label>
                 <input
-                  placeholder="nt  or  /srv/kapurlab/databases/blast/nt"
+                  placeholder="nt  or  /path/to/blast_db"
                   value={blastDb}
                   onChange={(e) => setBlastDb(e.target.value)}
                   disabled={running || krakenOnly || noBlast}

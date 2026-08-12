@@ -81,6 +81,18 @@ def load_config() -> Dict[str, Any]:
         save_config(DEFAULTS)
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         cfg = json.load(f)
+    # One-time seed: the DB dropdowns list exactly saved_kraken_dbs (nothing is
+    # discovered on disk anymore), so a config written before that list existed
+    # gets its working databases carried into it — once. A key that is present
+    # but empty means the user removed everything; that choice is respected.
+    if "saved_kraken_dbs" not in cfg:
+        seed = []
+        for cand in (cfg.get("kraken_db", ""), DEFAULTS.get("kraken_db", "")):
+            cand = str(cand or "").strip()
+            if cand and cand not in seed and (Path(cand) / "hash.k2d").is_file():
+                seed.append(cand)
+        cfg["saved_kraken_dbs"] = seed
+        save_config(cfg)
     for k, v in DEFAULTS.items():
         cfg.setdefault(k, v)
     # Heal configs that inherited the era of hard-coded DB defaults on a machine

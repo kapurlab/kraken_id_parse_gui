@@ -884,74 +884,99 @@ def api_get_config():
     return JSONResponse(load_config())
 
 
+def _db_entry(p: str) -> Dict[str, Any]:
+    """One dropdown entry for a database path: name, size (sum of *.k2d) and a
+    ``missing`` flag when the path no longer holds a Kraken2 DB (moved DB,
+    unmounted share) — shown rather than hidden so the user can remove it."""
+    d = Path(p)
+    entry: Dict[str, Any] = {"name": d.name, "path": p, "size_bytes": 0}
+    try:
+        if (d / "hash.k2d").is_file():
+            entry["size_bytes"] = sum(f.stat().st_size for f in d.glob("*.k2d"))
+        else:
+            entry["missing"] = True
+    except OSError:
+        entry["missing"] = True
+    return entry
+
+
 @app.get("/api/kraken-dbs")
 def api_kraken_dbs():
-    """Kraken2 databases for the settings/run dropdowns: every path the user
-    has saved (``saved_kraken_dbs``, removable in Settings) plus anything
-    discovered on disk.
+    """Kraken2 databases for the settings/run dropdowns: exactly the paths the
+    user has added (``saved_kraken_dbs``) plus the currently active one.
 
-    A valid Kraken2 DB is a directory containing ``hash.k2d``. Discovery scans
-    the parent dir(s) of the configured/saved DBs and the site database root
-    (BDTOOLS_DB_ROOT env, exported by bdtools launches) — never a baked-in
-    path. The free-text "custom path" field stays available for DBs outside
-    these roots.
+    This list is managed explicitly in Settings — add and remove, like the
+    saved project locations. Nothing is discovered or auto-included: a sibling
+    database sitting next to a configured one stays out of the dropdowns until
+    the user adds it. (Earlier versions scanned the parent directories of every
+    known DB and the site database root, which dumped every database on the
+    system into the list.)
     """
     cfg = load_config()
     current = (cfg.get("kraken_db") or "").strip()
     saved = [str(p).strip() for p in (cfg.get("saved_kraken_dbs") or []) if str(p).strip()]
-    roots: List[Path] = []
-    for cand in (current, DEFAULTS.get("kraken_db", ""), *saved):
-        if cand:
-            roots.append(Path(cand).parent)
-    db_root_env = os.environ.get("BDTOOLS_DB_ROOT", "").strip()
-    if db_root_env:
-        roots.append(Path(db_root_env) / "kraken2")
     dbs: List[Dict[str, Any]] = []
-    seen_roots: set = set()
-    seen_dbs: set = set()
-    for root in roots:
-        rkey = str(root)
-        if rkey in seen_roots:
+    seen: set = set()
+    for p in (*saved, current):
+        if not p:
             continue
-        seen_roots.add(rkey)
-        if not root.is_dir():
-            continue
-        try:
-            children = sorted(root.iterdir())
-        except OSError:
-            continue
-        for d in children:
-            try:
-                if not d.is_dir() or not (d / "hash.k2d").is_file():
-                    continue
-                rp = str(d.resolve())
-            except OSError:
-                continue
-            if rp in seen_dbs:
-                continue
-            seen_dbs.add(rp)
-            try:
-                size = sum(f.stat().st_size for f in d.glob("*.k2d"))
-            except OSError:
-                size = 0
-            dbs.append({"name": d.name, "path": str(d), "size_bytes": size})
-    # Saved entries the scan didn't reach (moved DB, unmounted share) still
-    # appear — flagged missing — so the user can see and remove them.
-    for p in saved:
         try:
             rp = str(Path(p).resolve())
         except OSError:
             rp = p
-        if rp in seen_dbs or p in seen_dbs:
+        if rp in seen:
             continue
-        seen_dbs.add(rp)
-        dbs.append({
-            "name": Path(p).name,
-            "path": p,
-            "size_bytes": 0,
-            "missing": not (Path(p) / "hash.k2d").is_file(),
-        })
+        seen.add(rp)
+        dbs.append(_db_entry(p))
     return JSONResponse({"databases": dbs, "current": current, "saved": saved})
+
+
+class DbPathPayload(BaseModel):
+    path: str
+
+
+@app.post("/api/kraken-dbs/add")
+def api_kraken_dbs_add(payload: DbPathPayload):
+    """Explicitly add one database location to the saved list. Validates the
+    path up front (same files kraken2 itself needs) so a typo is a clear error
+    now instead of a failed run later."""
+    p = (payload.path or "").strip().rstrip("/")
+    if not p:
+        raise HTTPException(400, "A database path is required.")
+    d = Path(p)
+    if not d.is_dir():
+        raise HTTPException(400, f"Not a directory: {p}")
+    missing = [n for n in ("hash.k2d", "opts.k2d", "taxo.k2d") if not (d / n).is_file()]
+    if missing:
+        raise HTTPException(
+            400,
+            f"Not a Kraken2 database (missing {', '.join(missing)}). "
+            "Point at the directory that contains hash.k2d, opts.k2d and taxo.k2d.",
+        )
+    cfg = load_config()
+    saved = [str(x).strip() for x in (cfg.get("saved_kraken_dbs") or []) if str(x).strip()]
+    if p not in saved:
+        saved.append(p)
+        cfg["saved_kraken_dbs"] = saved
+        save_config(cfg)
+    return JSONResponse({"ok": True, "saved": saved})
+
+
+@app.post("/api/kraken-dbs/remove")
+def api_kraken_dbs_remove(payload: DbPathPayload):
+    """Remove one database location from the saved list (nothing on disk is
+    touched). If it was the active database, the active choice is cleared too —
+    a removed database shouldn't stay silently selected."""
+    p = (payload.path or "").strip()
+    cfg = load_config()
+    saved = [str(x).strip() for x in (cfg.get("saved_kraken_dbs") or []) if str(x).strip()]
+    cfg["saved_kraken_dbs"] = [x for x in saved if x != p]
+    cleared = False
+    if (cfg.get("kraken_db") or "").strip() == p:
+        cfg["kraken_db"] = ""
+        cleared = True
+    save_config(cfg)
+    return JSONResponse({"ok": True, "saved": cfg["saved_kraken_dbs"], "cleared_active": cleared})
 
 
 def _remember_kraken_db(cfg: Dict[str, Any], db_path: str) -> bool:

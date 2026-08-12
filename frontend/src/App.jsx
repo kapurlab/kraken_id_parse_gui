@@ -90,6 +90,8 @@ export default function App() {
   // from /api/kraken-dbs. Powers the quick-switch dropdowns in Settings and
   // the run form.
   const [knownDbs, setKnownDbs] = useState([]);   // [{name, path, size_bytes, missing?}]
+  const [newDbPath, setNewDbPath] = useState("");  // "Add database location" input
+  const [addDbError, setAddDbError] = useState("");
   const [running, setRunning] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [jobStatus, setJobStatus] = useState("idle"); // idle | running | succeeded | failed
@@ -542,7 +544,7 @@ export default function App() {
     };
   }
 
-  // --- Project-root folder browser ---------------------------------------
+  // --- Server-side folder browser (projects root + add-database) ----------
   function browseDirs(path) {
     setFolderBrowser((s) => ({ ...s, loading: true, error: "" }));
     fetch(`./api/browse-dirs?path=${encodeURIComponent(path || "")}`)
@@ -550,12 +552,16 @@ export default function App() {
       .then((d) => setFolderBrowser((s) => ({ ...s, path: d.path, parent: d.parent, entries: d.entries, loading: false })))
       .catch((err) => setFolderBrowser((s) => ({ ...s, loading: false, error: err.message })));
   }
-  function openFolderBrowser() {
-    setFolderBrowser({ open: true, path: "", parent: null, entries: [], loading: true, error: "" });
-    browseDirs(settingsDraft.projects_root || "");
+  function openFolderBrowser(target = "projects_root") {
+    setFolderBrowser({ open: true, target, path: "", parent: null, entries: [], loading: true, error: "" });
+    browseDirs(target === "add_db" ? (newDbPath || "") : (settingsDraft.projects_root || ""));
   }
   function chooseFolder() {
-    setSettingsDraft((d) => ({ ...d, projects_root: folderBrowser.path }));
+    if (folderBrowser.target === "add_db") {
+      setNewDbPath(folderBrowser.path);
+    } else {
+      setSettingsDraft((d) => ({ ...d, projects_root: folderBrowser.path }));
+    }
     setFolderBrowser((s) => ({ ...s, open: false }));
   }
 
@@ -588,20 +594,49 @@ export default function App() {
       .catch(() => {});
   }
 
-  // Remove a remembered Kraken DB. If it was the active one, the active DB is
-  // cleared too — a removed database shouldn't stay silently selected.
-  function removeSavedDb(p) {
-    const nextSaved = (settingsDraft.saved_kraken_dbs || []).filter((d) => d !== p);
-    const nextActive = (settingsDraft.kraken_db || "") === p ? "" : settingsDraft.kraken_db;
-    const merged = { ...settingsDraft, saved_kraken_dbs: nextSaved, kraken_db: nextActive };
-    setSettingsDraft(merged);
-    fetch("./api/config", {
+  // Explicitly add one database location to the saved list. The backend
+  // validates it is a real Kraken2 DB (hash/opts/taxo.k2d) before saving, so
+  // a typo is an error here instead of a failed run later.
+  function addDbLocation() {
+    const p = (newDbPath || "").trim();
+    if (!p) return;
+    setAddDbError("");
+    fetch("./api/kraken-dbs/add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ saved_kraken_dbs: nextSaved, kraken_db: nextActive }),
+      body: JSON.stringify({ path: p }),
     })
-      .then(() => {
-        setKrakenDb(nextActive || "");
+      .then((r) => (r.ok ? r.json() : r.json().then((e) => { throw new Error(e.detail || "Could not add database"); })))
+      .then((d) => {
+        setNewDbPath("");
+        setSettingsDraft((prev) => ({
+          ...prev,
+          saved_kraken_dbs: d.saved,
+          // First database added with none active: make it the active one.
+          kraken_db: prev.kraken_db || p,
+        }));
+        if (!(settingsDraft.kraken_db || "").trim()) setKrakenDb(p);
+        loadKnownDbs();
+      })
+      .catch((err) => setAddDbError(err.message));
+  }
+
+  // Remove a database location. If it was the active one, the backend clears
+  // the active DB too — a removed database shouldn't stay silently selected.
+  function removeSavedDb(p) {
+    fetch("./api/kraken-dbs/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: p }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        setSettingsDraft((prev) => ({
+          ...prev,
+          saved_kraken_dbs: d.saved,
+          kraken_db: d.cleared_active ? "" : prev.kraken_db,
+        }));
+        if (d.cleared_active) setKrakenDb("");
         loadKnownDbs();
       })
       .catch(() => {});
@@ -742,46 +777,47 @@ export default function App() {
           <div className="row-grid row-grid-single">
             <section className="panel">
               <div className="form-section">
-                <label className="form-label">Kraken2 database</label>
-                {knownDbs.length ? (
-                  <select
-                    value={knownDbs.some((d) => d.path === (settingsDraft.kraken_db || "")) ? settingsDraft.kraken_db : ""}
-                    onChange={(e) => { if (e.target.value) setSettingsDraft((d) => ({ ...d, kraken_db: e.target.value })); }}
-                    style={{ marginBottom: 6 }}
-                  >
-                    <option value="">— pick a known database —</option>
-                    {knownDbs.map((d) => (
-                      <option key={d.path} value={d.path}>
-                        {d.name}{d.size_bytes ? ` (${(d.size_bytes / 1073741824).toFixed(1)} GB)` : ""}{d.missing ? " ⚠ missing" : ""} — {d.path}
-                      </option>
-                    ))}
-                  </select>
-                ) : null}
-                <input
-                  placeholder="/path/to/kraken2_db  (directory containing hash.k2d)"
-                  value={settingsDraft.kraken_db || ""}
-                  onChange={(e) => setSettingsDraft((d) => ({ ...d, kraken_db: e.target.value }))}
-                />
-                <div className="form-hint">
-                  Directory containing hash.k2d, opts.k2d, taxo.k2d. Every database you use is remembered below for quick switching.
-                </div>
+                <label className="form-label">Kraken2 databases</label>
                 {(settingsDraft.saved_kraken_dbs || []).length ? (
-                  <div style={{ marginTop: 6 }}>
-                    <label className="form-label">Remembered databases</label>
-                    {(settingsDraft.saved_kraken_dbs || []).map((p) => (
+                  (settingsDraft.saved_kraken_dbs || []).map((p) => {
+                    const info = knownDbs.find((d) => d.path === p);
+                    return (
                       <div key={p} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginBottom: 3 }}>
                         <span style={{ flex: 1, wordBreak: "break-all", opacity: p === settingsDraft.kraken_db ? 1 : 0.8 }}>
-                          {p}{p === settingsDraft.kraken_db ? "  ← active" : ""}
+                          {p}
+                          {info && info.size_bytes ? ` (${(info.size_bytes / 1073741824).toFixed(1)} GB)` : ""}
+                          {info && info.missing ? " ⚠ missing" : ""}
+                          {p === settingsDraft.kraken_db ? "  ← active" : ""}
                         </span>
                         <button type="button" className="ghost" title="Use this database"
                           onClick={() => setSettingsDraft((d) => ({ ...d, kraken_db: p }))}
                           disabled={p === settingsDraft.kraken_db}>Use</button>
-                        <button type="button" className="ghost" title="Forget this database (does not delete anything on disk)"
+                        <button type="button" className="ghost" title="Remove from this list (does not delete anything on disk)"
                           onClick={() => removeSavedDb(p)}>✕</button>
                       </div>
-                    ))}
-                  </div>
+                    );
+                  })
+                ) : (
+                  <div className="form-hint">No databases yet — add one below.</div>
+                )}
+                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                  <input
+                    style={{ flex: 1 }}
+                    placeholder="/path/to/kraken2_db  (directory containing hash.k2d)"
+                    value={newDbPath}
+                    onChange={(e) => { setNewDbPath(e.target.value); setAddDbError(""); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addDbLocation(); } }}
+                  />
+                  <button type="button" className="ghost" onClick={() => openFolderBrowser("add_db")}>Browse…</button>
+                  <button type="button" onClick={addDbLocation} disabled={!(newDbPath || "").trim()}>Add</button>
+                </div>
+                {addDbError ? (
+                  <div className="form-hint" style={{ color: "var(--danger, #b00020)" }}>{addDbError}</div>
                 ) : null}
+                <div className="form-hint">
+                  Only databases added here (and in the per-run picker) appear in the dropdowns — nothing is
+                  auto-discovered. “Use” makes one active for new runs; remember to click Save.
+                </div>
               </div>
               <div className="form-section">
                 <label className="form-label">BLAST database path or name</label>
@@ -1321,7 +1357,7 @@ export default function App() {
                     disabled={running}
                     style={{ marginBottom: 6 }}
                   >
-                    <option value="">— switch to a remembered database —</option>
+                    <option value="">— switch to a saved database (managed in Settings) —</option>
                     {knownDbs.map((d) => (
                       <option key={d.path} value={d.path}>
                         {d.name}{d.missing ? " ⚠ missing" : ""} — {d.path}
@@ -1471,7 +1507,7 @@ export default function App() {
             style={{ background: "var(--panel, #fff)", color: "inherit", borderRadius: 10, width: "min(640px, 92vw)", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}
           >
             <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border, #ddd)", fontWeight: 700 }}>
-              Select a projects root
+              {folderBrowser.target === "add_db" ? "Select a Kraken2 database folder" : "Select a projects root"}
             </div>
             <div style={{ padding: "10px 16px", display: "flex", gap: 6, alignItems: "center" }}>
               <button type="button" className="ghost" disabled={!folderBrowser.parent || folderBrowser.loading} onClick={() => browseDirs(folderBrowser.parent)}>↑ Up</button>

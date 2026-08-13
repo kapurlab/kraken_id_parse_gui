@@ -8,7 +8,10 @@ import { useResults } from "./useResults";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const APP_VERSION = "0.2.6";
+// Fallback ONLY: the header shows the backend-reported version (git
+// describe — the same string the Diagnostic Tools Dashboard shows) and
+// uses this constant just until that arrives / on installs without git.
+const APP_VERSION = "0.2.8";
 
 // Taxon presets are loaded at runtime from the shared config/taxa.yaml via
 // /api/taxa. This fallback is only used if that fetch fails.
@@ -106,6 +109,9 @@ export default function App() {
   const [showProjects, setShowProjects] = useState(true);
   const [showRun, setShowRun] = useState(true);
   const [showLogs, setShowLogs] = useState(true);
+  // Version of the deployed checkout as reported by the backend (git
+  // describe — the same string the Diagnostic Tools Dashboard shows).
+  const [serverVersion, setServerVersion] = useState("");
 
   const logRef = useRef(null);
   const eventSourceRef = useRef(null);
@@ -117,6 +123,7 @@ export default function App() {
       .then((cfg) => {
         setKrakenDb(cfg.kraken_db || "");
         setBlastDb(cfg.blast_db || "nt");
+        setServerVersion(cfg.app_version || "");
         setSettingsDraft(cfg);
       })
       .catch(() => {});
@@ -700,7 +707,7 @@ export default function App() {
           <img className="app-logo" src="./krona_icon.svg" alt="Krona taxonomy chart icon" />
           <div>
             <h1>
-              Kraken ID Parse <span className="version-tag">v{APP_VERSION}</span>
+              Kraken ID Parse <span className="version-tag">{serverVersion || `v${APP_VERSION}`}</span>
             </h1>
             <p>Classify and isolate reads for species-level identification and contamination screening</p>
           </div>

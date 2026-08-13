@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -125,6 +126,28 @@ def _write_taxa(taxa: List[str]) -> None:
         else:
             lines.append(f"- {name}")
     _TAXA_YAML.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+# ---------------------------------------------------------------------------
+# Version
+# ---------------------------------------------------------------------------
+def _resolve_app_version() -> str:
+    """Version of the deployed checkout — the exact string the Diagnostic
+    Tools Dashboard shows for this tool (`git describe --tags --always`,
+    the same command bdtools runs). Resolved once at startup; empty when
+    git or the .git dir is unavailable, in which case the frontend falls
+    back to its built-in constant."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "describe", "--tags", "--always"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+APP_VERSION = _resolve_app_version()
+
 
 # ---------------------------------------------------------------------------
 # App & job manager
@@ -881,7 +904,13 @@ def api_add_taxon(payload: TaxonPayload):
 
 @app.get("/api/config")
 def api_get_config():
-    return JSONResponse(load_config())
+    cfg = load_config()
+    # Deployed checkout's version (git describe) — what the dashboard shows.
+    # Injected into the response only, never written back to the config file
+    # (and POST /api/config's ConfigPayload has no such field, so a round-trip
+    # can't persist it either).
+    cfg["app_version"] = APP_VERSION
+    return JSONResponse(cfg)
 
 
 def _db_entry(p: str) -> Dict[str, Any]:

@@ -16,6 +16,60 @@ from Bio import SeqIO
 from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
 
 
+# DB prefixes already pulled into the page cache by this process, so the two or
+# three Blast_Fasta rounds of one pipeline run pay the disk cost only once.
+_PREWARMED_DBS = set()
+
+
+def _prewarm_blast_db(blast_db):
+    """Sequentially read a local BLAST DB's volumes into the OS page cache.
+
+    blastn memory-maps its database and touches it in an essentially random
+    order. Against a cold cache on rotational storage that is a 4 KB seek per
+    page fault — a single query can sit in disk-wait for an hour while every
+    thread idles, which reads as "BLAST stopped working". One sequential pass
+    beforehand moves the same bytes at streaming speed, after which blastn is
+    CPU-bound and its -num_threads actually help.
+
+    Only does anything when the DB is local files and comfortably fits in the
+    memory the kernel could actually give to cache (MemAvailable); otherwise it
+    says why and lets blastn run as before. Linux-only by design — /proc/meminfo
+    is the honest availability signal, and the macOS installs run small DBs.
+    """
+    if blast_db in _PREWARMED_DBS:
+        return
+    volume_re = re.compile(r'\.(\d+\.)?[np][a-z]{2}$')
+    volumes = [f for f in glob.glob(glob.escape(blast_db) + '*')
+               if volume_re.search(f) and os.path.isfile(f)]
+    if not volumes:
+        return  # not a local DB path ("nt" remote or a bad path) — blastn will say so
+    total = sum(os.path.getsize(f) for f in volumes)
+    try:
+        with open('/proc/meminfo') as fh:
+            mem_available = next(int(line.split()[1]) * 1024
+                                 for line in fh if line.startswith('MemAvailable:'))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return  # no /proc/meminfo (macOS) — keep prior behavior
+    if total > 0.6 * mem_available:
+        print(f'{bcolors.YELLOW}BLAST DB is {total / 1e9:.1f} GB but only '
+              f'{mem_available / 1e9:.1f} GB RAM is available — skipping cache '
+              f'prewarm; BLAST may be disk-bound.{bcolors.ENDC}', flush=True)
+        return
+    print(f'{bcolors.BLUE}Prewarming BLAST DB into RAM cache '
+          f'({total / 1e9:.1f} GB, {len(volumes)} files)...{bcolors.ENDC}', flush=True)
+    started = datetime.now()
+    for f in sorted(volumes):
+        try:
+            with open(f, 'rb') as fh:
+                while fh.read(32 * 1024 * 1024):
+                    pass
+        except OSError:
+            continue
+    elapsed = (datetime.now() - started).total_seconds()
+    print(f'{bcolors.BLUE}BLAST DB cached in {elapsed:.0f}s.{bcolors.ENDC}', flush=True)
+    _PREWARMED_DBS.add(blast_db)
+
+
 class Blast_Fasta(Setup, bcolors):
     def __init__(self, FASTA=None, search=None, blast_out=None, format="6 qseqid sacc bitscore pident stitle", num_alignment=3, blast_db="nt"):
         Setup.__init__(self, FASTA=FASTA)
@@ -32,13 +86,18 @@ class Blast_Fasta(Setup, bcolors):
             blastout_file = blast_out
         else:
             fasta_size = sum([len(seq_record.seq) for seq_record in SeqIO.parse(FASTA, "fasta")])
-            
+
             # Check if we're in a SLURM environment
             is_slurm = shutil.which('sbatch') is not None
-            
+            use_slurm = is_slurm and (os.path.isdir("/project") or os.path.isdir("/software/public/databases"))
+            if not use_slurm:
+                # blastn runs on THIS host — make sure the DB is served from RAM,
+                # not one 4 KB disk seek at a time (see _prewarm_blast_db).
+                _prewarm_blast_db(blast_db)
+
             if fasta_size < 50000:
                 print(f'\n{bcolors.YELLOW}Running BLAST...{bcolors.ENDC}\n')
-                if is_slurm and (os.path.isdir("/project") or os.path.isdir("/software/public/databases")):
+                if use_slurm:
                     # Use SLURM for execution
                     with open('batch.sh', 'w') as rsh:
                         rsh.write(
@@ -105,7 +164,7 @@ class Blast_Fasta(Setup, bcolors):
                     self.split_file_list.append(outfile)
                     SeqIO.write(each_list, outfile, "fasta")
                 
-                if is_slurm and (os.path.isdir("/project") or os.path.isdir("/software/public/databases")):
+                if use_slurm:
                     # SLURM batch processing
                     with open('batch.sh', 'w') as rsh:
                         rsh.write(

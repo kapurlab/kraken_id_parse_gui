@@ -61,8 +61,16 @@ export default function App() {
   const [taxonPresets, setTaxonPresets] = useState(TAXON_PRESETS_FALLBACK); // from /api/taxa
   const [newTaxon, setNewTaxon] = useState("");          // "add search name" input
   const [addingTaxon, setAddingTaxon] = useState(false);
-  const [krakenOnly, setKrakenOnly] = useState(false);   // Kraken2 + Krona only, no read parsing
-  const [noBlast, setNoBlast] = useState(false);         // Kraken2 + read parsing only, no assembly/BLAST
+  /* One of three mutually exclusive run modes, so the pipeline's three stopping
+     points are each a thing you pick rather than a combination of two negative
+     checkboxes ("not kraken-only, not no-blast" meant full identification).
+       kraken_only — Kraken2 + Krona chart
+       parse       — + extract the target taxon's reads
+       full        — + assemble, BLAST and coverage
+     Krona-only is the default: it is the quickest answer and needs no taxon. */
+  const [runMode, setRunMode] = useState("kraken_only");
+  const krakenOnly = runMode === "kraken_only";
+  const noBlast = runMode === "parse";
   const [krakenDb, setKrakenDb] = useState("");
   const [blastDb, setBlastDb] = useState("nt");
   // Known Kraken2 DBs — remembered (saved_kraken_dbs) + discovered on disk —
@@ -460,6 +468,39 @@ export default function App() {
       });
       return next;
     });
+  }
+
+  // Anchor for shift-click range selection: the last row toggled by hand.
+  const lastToggledRef = useRef(null);
+
+  /* Clicking anywhere on a sample card selects it — the checkbox is a target
+     the size of a fingernail on a list that runs to thousands of rows. Clicks
+     that land on a real control (the run button, a link, the checkbox itself)
+     are left alone, so the card being clickable never steals a deliberate
+     action. Shift-click extends from the last row toggled, the convention
+     every file manager uses. */
+  function onSampleRowClick(project, s, event) {
+    if (event.target.closest("input, button, a, select, textarea, label, summary")) return;
+    if (event.shiftKey && lastToggledRef.current) {
+      const vis = visibleSamples(project);
+      const from = vis.findIndex((x) => sampleKey(project, x) === lastToggledRef.current);
+      const to = vis.findIndex((x) => sampleKey(project, x) === sampleKey(project, s));
+      if (from !== -1 && to !== -1) {
+        const [lo, hi] = from < to ? [from, to] : [to, from];
+        // Extend rather than replace: shift-clicking adds the span, matching
+        // how a range select behaves everywhere else.
+        setCheckedKeys((m) => {
+          const next = { ...m };
+          for (let i = lo; i <= hi; i++) {
+            next[sampleKey(project, vis[i])] = { project, ...vis[i] };
+          }
+          return next;
+        });
+        return;
+      }
+    }
+    lastToggledRef.current = sampleKey(project, s);
+    toggleChecked(project, s);
   }
 
   function toggleChecked(project, s) {
@@ -1067,7 +1108,19 @@ export default function App() {
                           return (
                           <div
                             key={s.r1}
-                            className={`sample-item ${isActive(proj.name, s) ? "active" : ""}`}
+                            className={`sample-item selectable ${checked ? "checked" : ""} ${isActive(proj.name, s) ? "active" : ""}`}
+                            onClick={(e) => onSampleRowClick(proj.name, s, e)}
+                            onKeyDown={(e) => {
+                              if (e.key === " " || e.key === "Enter") {
+                                if (e.target.closest("input, button, a, select, textarea, label, summary")) return;
+                                e.preventDefault();
+                                onSampleRowClick(proj.name, s, e);
+                              }
+                            }}
+                            role="checkbox"
+                            aria-checked={checked}
+                            tabIndex={0}
+                            title="Click anywhere on this sample to select it (shift-click to select a range)"
                           >
                             <div className="sample-name-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                               <input
@@ -1076,26 +1129,31 @@ export default function App() {
                                 onChange={() => toggleChecked(proj.name, s)}
                                 title="Select for batch run"
                               />
-                              <div
-                                className="sample-name"
-                                title={hasRun
-                                  ? `${s.sample} — click to find this sample in Kraken Results below`
-                                  : `${s.sample} — no run yet; results appear in Kraken Results below after a run`}
-                                style={{ flex: 1, cursor: "pointer" }}
-                                onClick={() => jumpToResults(proj.name, s.sample)}
-                              >
+                              <div className="sample-name" title={s.sample} style={{ flex: 1 }}>
                                 {s.sample}
                               </div>
                               <span className={`read-badge ${s.paired ? "badge-pe" : "badge-se"}`}>
                                 {s.paired ? "PE" : "SE"}
                               </span>
-                              <span
-                                className={`run-status run-status-${status}`}
-                                title={`Run status: ${status}`}
-                                style={{ fontSize: 11, whiteSpace: "nowrap" }}
-                              >
-                                {statusLabel}
-                              </span>
+                              {status === "done" ? (
+                                <button
+                                  type="button"
+                                  className={`run-status run-status-${status} link-like`}
+                                  title="Find this sample in Kraken Results below"
+                                  onClick={() => jumpToResults(proj.name, s.sample)}
+                                  style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                                >
+                                  {statusLabel}
+                                </button>
+                              ) : (
+                                <span
+                                  className={`run-status run-status-${status}`}
+                                  title={`Run status: ${status}`}
+                                  style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                                >
+                                  {statusLabel}
+                                </span>
+                              )}
                               <button
                                 className="ghost"
                                 style={{ fontSize: 11 }}
@@ -1290,30 +1348,32 @@ export default function App() {
               <h2>Configure &amp; Run</h2>
 
               <div className="form-section">
-                <label className="checkbox-label" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-                  <input
-                    type="checkbox"
-                    checked={krakenOnly}
-                    onChange={(e) => { setKrakenOnly(e.target.checked); if (e.target.checked) setNoBlast(false); }}
-                    disabled={running}
-                  />
-                  <span>Kraken only (Krona graph, no read parsing)</span>
-                </label>
-                <div className="note" style={{ marginTop: 4 }}>
-                  Runs Kraken2 and produces the Krona graph only — skips read parsing, assembly, and BLAST. No target taxon needed.
-                </div>
-                <label className="checkbox-label" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginTop: 10 }}>
-                  <input
-                    type="checkbox"
-                    checked={noBlast}
-                    onChange={(e) => { setNoBlast(e.target.checked); if (e.target.checked) setKrakenOnly(false); }}
-                    disabled={running}
-                  />
-                  <span>Parse reads only (skip BLAST)</span>
-                </label>
-                <div className="note" style={{ marginTop: 4 }}>
-                  Runs Kraken2 and extracts the target taxon's reads, then stops — skips assembly, BLAST, and coverage. Leaves the parsed FASTQ.gz reads. Requires a target taxon.
-                </div>
+                <label className="form-label">Run mode</label>
+                {[
+                  { id: "kraken_only", title: "Kraken + Krona only",
+                    body: "Classify the reads and produce the interactive Krona chart, then stop. No target taxon needed — the quickest way to see what is in a sample." },
+                  { id: "parse", title: "Kraken + parse reads",
+                    body: "Also extract the target taxon's reads and leave them as FASTQ.gz (auto-imported for re-running through vSNP). Skips assembly, BLAST and coverage. Needs a target taxon." },
+                  { id: "full", title: "Kraken + parse + BLAST",
+                    body: "The full identification: also assemble the parsed reads, BLAST them for a species call, and build the coverage charts. Slowest; needs a target taxon and a BLAST database." },
+                ].map((m) => (
+                  <label
+                    key={m.id}
+                    className={`mode-card ${runMode === m.id ? "selected" : ""}`}
+                  >
+                    <input
+                      type="radio"
+                      name="krakenRunMode"
+                      checked={runMode === m.id}
+                      disabled={running}
+                      onChange={() => setRunMode(m.id)}
+                    />
+                    <span>
+                      <strong>{m.title}</strong>
+                      <span className="mode-card-body">{m.body}</span>
+                    </span>
+                  </label>
+                ))}
               </div>
 
               <div className="form-section">

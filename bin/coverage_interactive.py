@@ -81,35 +81,49 @@ def _zero_runs(depths: List[float]) -> List[Tuple[int, int]]:
     return runs
 
 
-def bar_widths(positions: List[int], total_len: int) -> List[float]:
-    """Per-bar width in x units: wide enough to see when variants are sparse,
-    never wider than a bar's own nearest gap when they are dense."""
-    if not positions:
-        return []
-    nominal = max(total_len / 110.0, 1.0)
-    floor = max(total_len / 3000.0, 0.05)
-    ordered = sorted(positions)
-    nearest = {}
-    for i, p in enumerate(ordered):
-        gaps = []
-        if i > 0:
-            gaps.append(p - ordered[i - 1])
-        if i < len(ordered) - 1:
-            gaps.append(ordered[i + 1] - p)
-        gaps = [g for g in gaps if g > 0]
-        nearest[p] = min(gaps) if gaps else None
-    out = []
-    for p in positions:
-        g = nearest.get(p)
-        if g is None:
-            out.append(max(nominal, floor))
+def allele_stem_traces(go, variants, depths, line_width: float = 3.0):
+    """Stacked allele "stems" drawn ON the coverage curve, one trace per base.
+
+    Each variant gets a vertical line at its position running from 0 up to the
+    read depth there — the height the diamond sits at — split into coloured
+    lengths by the nucleotides observed. A 50/50 G/A call is a stem that is
+    half yellow, half green.
+
+    Scatter rather than Bar: scatter shares the layer the coverage curve is in,
+    so the stems sit ON TOP of the area fill instead of behind it, and the
+    width is in PIXELS — a hairline stays a hairline whether the reference is
+    1 kb or 4 Mb, and zooming does not fatten it. One trace per base keeps the
+    legend to four entries no matter how many variants there are.
+    """
+    by_base: Dict[str, Dict[str, List]] = {}
+    for v in variants:
+        pos = v["position"]
+        depth = depths[pos - 1] if 0 < pos <= len(depths) else 0
+        if depth <= 0:
             continue
-        # The gap is a HARD ceiling: the floor may raise a bar toward it, never
-        # past it. (Reversing that is invisible on a 2 kb segment, where the
-        # floor is sub-base, and guarantees overlap on a 4 Mb genome, where it
-        # is ~1.5 kb.)
-        out.append(min(g * 0.9, max(nominal, floor)))
-    return out
+        bottom = 0.0
+        for allele, frac, count in v["composition"]:
+            top = bottom + frac * depth
+            key = allele if allele in NT_COLORS else "other"
+            entry = by_base.setdefault(key, {"x": [], "y": [], "text": []})
+            # None breaks the polyline so segments stay separate strokes.
+            entry["x"] += [pos, pos, None]
+            entry["y"] += [bottom, top, None]
+            label = f"{allele}: {frac * 100:.1f}%" + (f" ({count:,} reads)" if count else "")
+            entry["text"] += [label, label, None]
+            bottom = top
+    traces = []
+    ordered = [k for k in NT_ORDER if k in by_base] + \
+              [k for k in by_base if k not in NT_ORDER]
+    for key in ordered:
+        e = by_base[key]
+        traces.append(go.Scatter(
+            x=e["x"], y=e["y"], mode="lines", name=key,
+            line=dict(color=NT_COLORS.get(key, "#8B96A0"), width=line_width),
+            text=e["text"], hovertemplate="pos %{x:,} — %{text}<extra></extra>",
+            connectgaps=False, showlegend=True,
+        ))
+    return traces
 
 
 def call_variants(bam_path: str, ref_id: str, ref_seq: str,
@@ -156,9 +170,14 @@ def call_variants(bam_path: str, ref_id: str, ref_seq: str,
 
 def _figure(sample: str, ref_id: str, header: str, depths: List[float],
             variants: List[Dict[str, Any]], guided_by: str = ""):
+    """One reference's Coverage & Variants figure.
+
+    A single panel: the depth curve, a diamond at every variant, and under each
+    diamond a stem down to zero coloured by the nucleotides observed there in
+    proportion.
+    """
     try:
         import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
     except Exception:  # noqa: BLE001
         return None
     total_len = len(depths)
@@ -168,37 +187,31 @@ def _figure(sample: str, ref_id: str, header: str, depths: List[float],
     pct_cov = covered / total_len * 100
     mean = sum(depths) / total_len
 
-    has_comp = bool(variants)
-    if has_comp:
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            row_heights=[0.76, 0.24], vertical_spacing=0.045)
-        main = dict(row=1, col=1)
-    else:
-        fig = go.Figure()
-        main = {}
-
+    fig = go.Figure()
     xs, ys = _bin_depths(depths)
     fig.add_trace(go.Scatter(
         x=xs, y=ys, mode="lines", line=dict(color=TEAL_DARK, width=1),
         fill="tozeroy", fillcolor="rgba(76,140,138,0.30)",
         name="depth", showlegend=False,
         hovertemplate="pos %{x:,}: %{y:.0f}×<extra></extra>",
-    ), **main)
+    ))
     for a, b in _zero_runs(depths):
         if (b - a) < max(total_len * 0.0005, 1):
             continue  # single-base dropouts would just stipple the chart
         if (b - a) > total_len * 0.02:
             fig.add_vrect(x0=a, x1=b, fillcolor="rgba(196,106,106,0.20)", line_width=0,
                           annotation_text="no coverage", annotation_position="top left",
-                          annotation_font_size=10, annotation_font_color=DANGER, **main)
+                          annotation_font_size=10, annotation_font_color=DANGER)
         else:
-            fig.add_vrect(x0=a, x1=b, fillcolor="rgba(196,106,106,0.20)",
-                          line_width=0, **main)
+            fig.add_vrect(x0=a, x1=b, fillcolor="rgba(196,106,106,0.20)", line_width=0)
     fig.add_hline(y=DEPTH_THRESHOLD, line_dash="dash", line_color=DANGER,
                   annotation_text=f"{DEPTH_THRESHOLD}×", annotation_position="top left",
-                  annotation_font_color=DANGER, **main)
+                  annotation_font_color=DANGER)
 
-    if has_comp:
+    if variants:
+        # Stems first so the diamonds stay on top of them.
+        for tr in allele_stem_traces(go, variants, depths):
+            fig.add_trace(tr)
         vx = [v["position"] for v in variants]
         vy = [depths[v["position"] - 1] if v["position"] <= total_len else 0 for v in variants]
         vtext = [
@@ -211,37 +224,7 @@ def _figure(sample: str, ref_id: str, header: str, depths: List[float],
             marker=dict(color=DANGER, size=9, symbol="diamond",
                         line=dict(color="#7E3B3B", width=1)),
             text=vtext, hovertemplate="pos %{x:,}: %{text}<extra>SNP</extra>",
-        ), **main)
-
-        widths = bar_widths(vx, total_len)
-        seen = []
-        for v in variants:
-            for b, _f, _c in v["composition"]:
-                key = b if b in NT_COLORS else "other"
-                if key not in seen:
-                    seen.append(key)
-        for key in [k for k in NT_ORDER if k in seen] + (["other"] if "other" in seen else []):
-            col_y, col_t = [], []
-            for v in variants:
-                frac = sum(f for b, f, _c in v["composition"]
-                           if (b if b in NT_COLORS else "other") == key)
-                cnt = sum(c for b, _f, c in v["composition"]
-                          if (b if b in NT_COLORS else "other") == key)
-                col_y.append(frac)
-                col_t.append(f"{key}: {frac * 100:.1f}%" + (f" ({cnt:,} reads)" if cnt else ""))
-            fig.add_trace(go.Bar(
-                x=vx, y=col_y, width=widths, name=key,
-                marker=dict(color=NT_COLORS.get(key, "#8B96A0"), line=dict(width=0)),
-                text=col_t, hovertemplate="pos %{x:,} — %{text}<extra></extra>",
-            ), row=2, col=1)
-        fig.update_layout(barmode="stack", bargap=0)
-        fig.update_yaxes(title_text="allele", range=[0, 1], tickformat=".0%",
-                         tickvals=[0, 0.5, 1], row=2, col=1)
-        fig.update_xaxes(title_text="Position (bp)", row=2, col=1)
-        fig.update_yaxes(title_text="Coverage depth", row=1, col=1)
-    else:
-        fig.update_xaxes(title_text="Position (bp)")
-        fig.update_yaxes(title_text="Coverage depth")
+        ))
 
     guided = f"<br><sup>{guided_by}</sup>" if guided_by else ""
     fig.update_layout(
@@ -251,12 +234,13 @@ def _figure(sample: str, ref_id: str, header: str, depths: List[float],
                          f"{pct_cov:.1f}% covered</sup>{guided}"),
                    font=dict(size=15, color=INK)),
         template="plotly_white",
-        height=440 if has_comp else 340,
+        height=380,
         margin=dict(l=70, r=24, t=96, b=48),
-        showlegend=has_comp,
-        legend=dict(orientation="h", yanchor="top", y=-0.16, x=0,
+        xaxis_title="Position (bp)",
+        yaxis_title="Coverage depth",
+        showlegend=bool(variants),
+        legend=dict(orientation="h", yanchor="top", y=-0.18, x=0,
                     font=dict(size=11), title=dict(text="SNP alleles  ", side="left")),
-        bargap=0,
     )
     return fig
 

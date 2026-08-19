@@ -370,6 +370,32 @@ def collect_legacy_report(output_dir: Path) -> Dict[str, Any]:
     }
 
 
+_PDF_WARNING_RE = re.compile(r"pdf|weasyprint|chromium|chrome|edge", re.IGNORECASE)
+
+
+def _drop_stale_pdf_warnings(warnings, output_dir: Path):
+    """Drop PDF-export warnings when report.pdf is actually sitting right there.
+
+    Such a warning records ONE attempt, but it is persisted in
+    run_manifest.json and replayed by every later render. Every run made on a
+    machine with no browser installed carries "No Chromium/Chrome/Edge
+    executable found for PDF export" forever — so after the export started
+    working, re-rendering those runs produced a report that warns no PDF could
+    be made directly above a link to the PDF. A warning that contradicts the
+    directory it lives in trains the reader to ignore the warnings section,
+    which is the one part of a diagnostic report that must keep its credibility.
+
+    Only ever removes them when the artifact exists; a real failure still warns.
+    """
+    items = [w for w in (warnings or [])]
+    try:
+        if not (Path(output_dir) / "report.pdf").is_file():
+            return items
+    except OSError:
+        return items
+    return [w for w in items if not _PDF_WARNING_RE.search(str(w))]
+
+
 def build_run_manifest(
     *,
     sample_id: str,
@@ -397,7 +423,7 @@ def build_run_manifest(
         "sample_id": sample_id,
         "run_id": output_dir.name,
         "status": status,
-        "warnings": warnings or [],
+        "warnings": _drop_stale_pdf_warnings(warnings, output_dir),
         "inputs": inputs,
         "parameters": parameters,
         "software": {

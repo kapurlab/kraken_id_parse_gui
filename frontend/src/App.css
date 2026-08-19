@@ -171,6 +171,11 @@ body {
 }
 .row-grid-single { grid-template-columns: 1fr; }
 .row-grid-split { grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.4fr); }
+/* Run panel beside its results table — the vSNP Step 1 proportions, where the
+   results table gets the wider column. The pane sits inside a plain wrapper
+   div (a scroll anchor), so height flows through it too. */
+.row-grid-run { grid-template-columns: minmax(280px, 1fr) minmax(360px, 2fr); }
+.row-grid-run > div > .panel { height: 100%; }
 .row-grid > .panel { height: 100%; }
 
 /* Panels */
@@ -417,7 +422,7 @@ button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20p
 
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
-  .row-grid, .row-grid-split { grid-template-columns: 1fr; }
+  .row-grid, .row-grid-split, .row-grid-run { grid-template-columns: 1fr; }
   .input-columns { grid-template-columns: 1fr; }
 }
 @media (max-width: 720px) {

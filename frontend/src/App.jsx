@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import ThemeToggle from "./ThemeToggle";
 import CitationFooter from "./Citations";
@@ -11,7 +11,7 @@ import { useResults } from "./useResults";
 // Fallback ONLY: the header shows the backend-reported version (git
 // describe — the same string the Diagnostic Tools Dashboard shows) and
 // uses this constant just until that arrives / on installs without git.
-const APP_VERSION = "0.2.8";
+const APP_VERSION = "0.2.9";
 
 // Taxon presets are loaded at runtime from the shared config/taxa.yaml via
 // /api/taxa. This fallback is only used if that fetch fails.
@@ -23,18 +23,6 @@ const TAXON_PRESETS_FALLBACK = [
   "Isavirus salaris",
 ];
 
-function fileIcon(name) {
-  if (name.endsWith(".json")) return "📁";
-  if (name.endsWith(".xlsx")) return "📊";
-  if (name.endsWith(".pdf")) return "📄";
-  if (name.endsWith(".png")) return "🖼";
-  if (name.endsWith(".fasta") || name.endsWith(".fa")) return "🧬";
-  if (name.endsWith(".vcf")) return "🔬";
-  if (name.endsWith(".txt")) return "📝";
-  if (name.endsWith(".html")) return "🌐";
-  return "📁";
-}
-
 function fmtSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -44,14 +32,6 @@ function fmtSize(bytes) {
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
-// The tool-specific columns of the shared Results table. Everything else
-// about the pane is identical across the suite.
-const RESULT_COLUMNS = [
-  { key: "top_taxon", label: "Top taxon" },
-  { key: "top_pct", label: "%", align: "right" },
-  { key: "runner_up", label: "Runner-up" },
-];
-
 export default function App() {
   const [projects, setProjects] = useState([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -63,7 +43,6 @@ export default function App() {
   /* Every completed sample for the active project. Refreshed when a run
      finishes rather than polled, matching the rest of the suite. */
   const results = useResults(activeProject);
-  const [showResultsPane, setShowResultsPane] = useState(true);
   const [addPath, setAddPath] = useState({});       // proj -> import path string
   const [sraText, setSraText] = useState({});       // proj -> SRA accessions string
   const [addStatus, setAddStatus] = useState({});   // proj -> status message
@@ -76,9 +55,6 @@ export default function App() {
   // Filter for the Projects sample list. Its check-all acts on what this
   // filter leaves visible, never on the whole project.
   const [projSampleFilter, setProjSampleFilter] = useState("");
-  const [openResults, setOpenResults] = useState({});    // key → bool (inline results expanded)
-  const [sampleResults, setSampleResults] = useState({}); // key → {loading, status, present, files}
-  const [vsnpResults, setVsnpResults] = useState({});    // key → {loading, step1_present, files, step2} (cross-tool)
   const [activeRun, setActiveRun] = useState(null);      // {project, sample} currently running
   const [queueInfo, setQueueInfo] = useState({ total: 0, done: 0 }); // batch progress
   const [taxon, setTaxon] = useState("");
@@ -115,6 +91,59 @@ export default function App() {
 
   const logRef = useRef(null);
   const eventSourceRef = useRef(null);
+  const resultsAnchorRef = useRef(null); // scroll target: the Kraken Results pane
+
+  // The tool-specific columns of the shared Results table (everything else
+  // about the pane is identical across the suite): the Kraken verdict, plus
+  // one-click links to a sample's Krona chart and run report — the files a
+  // diagnostician opens first, without digging through the Files cell.
+  const resultColumns = useMemo(() => {
+    const fileHref = (row, cats) => {
+      const f = (row.files || []).find((x) => cats.includes(x.category));
+      return f
+        ? `./api/projects/${encodeURIComponent(activeProject)}/file?path=${encodeURIComponent(f.path)}&inline=1`
+        : null;
+    };
+    return [
+      { key: "top_taxon", label: "Top taxon" },
+      { key: "top_pct", label: "%", align: "right" },
+      { key: "runner_up", label: "Runner-up" },
+      {
+        key: "quick_open",
+        label: "Open",
+        render: (row) => {
+          const krona = fileHref(row, ["krona"]);
+          const report = fileHref(row, ["report_html", "report_pdf"]);
+          if (!krona && !report) return "—";
+          return (
+            <span style={{ display: "inline-flex", gap: 8, whiteSpace: "nowrap" }}>
+              {krona && (
+                <a href={krona} target="_blank" rel="noopener noreferrer"
+                   title="Open the interactive Krona taxonomy chart">📊 Krona</a>
+              )}
+              {report && (
+                <a href={report} target="_blank" rel="noopener noreferrer"
+                   title="Open this sample's run report">📄 Report</a>
+              )}
+            </span>
+          );
+        },
+      },
+    ];
+  }, [activeProject]);
+
+  // "Samples ran are found in the Results pane": clicking a sample in the
+  // Projects tree selects its project, filters the Kraken Results table down
+  // to that sample, and scrolls the table into view.
+  function jumpToResults(project, sampleName) {
+    if (project !== activeProject) selectProject(project);
+    results.setFilter(sampleName);
+    setShowRun(true);
+    // Let the section render before scrolling to it.
+    setTimeout(() => {
+      resultsAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  }
 
   // Load config & projects on mount; reconnect to any pipeline still running
   useEffect(() => {
@@ -425,33 +454,6 @@ export default function App() {
     });
   }
 
-  function loadSampleResults(project, s) {
-    const key = sampleKey(project, s);
-    setSampleResults((m) => ({ ...m, [key]: { ...(m[key] || {}), loading: true } }));
-    fetch(`./api/projects/${encodeURIComponent(project)}/samples/${encodeURIComponent(s.sample)}/kraken-results`)
-      .then((r) => r.json())
-      .then((data) => setSampleResults((m) => ({ ...m, [key]: { loading: false, ...data } })))
-      .catch(() => setSampleResults((m) => ({ ...m, [key]: { loading: false, present: false, status: "none", files: [] } })));
-  }
-
-  // Cross-tool: vSNP results for the same sample (step1 files + latest step2).
-  function loadVsnpResults(project, s) {
-    const key = sampleKey(project, s);
-    setVsnpResults((m) => ({ ...m, [key]: { ...(m[key] || {}), loading: true } }));
-    fetch(`./api/projects/${encodeURIComponent(project)}/vsnp/samples/${encodeURIComponent(s.sample)}/files`)
-      .then((r) => r.json())
-      .then((data) => setVsnpResults((m) => ({ ...m, [key]: { loading: false, ...data } })))
-      .catch(() => setVsnpResults((m) => ({ ...m, [key]: { loading: false, step1_present: false, files: [], step2: { present: false } } })));
-  }
-
-  function toggleResults(project, s) {
-    const key = sampleKey(project, s);
-    const willOpen = !openResults[key];
-    setOpenResults((m) => ({ ...m, [key]: willOpen }));
-    if (willOpen && !sampleResults[key]) loadSampleResults(project, s);
-    if (willOpen && !vsnpResults[key]) loadVsnpResults(project, s);
-  }
-
   // Run one or more samples back-to-back (sequential — avoids overloading the
   // box with concurrent heavy pipelines, and keeps a single coherent live log).
   async function runSamples(list) {
@@ -481,10 +483,6 @@ export default function App() {
       setJobStatus("running");
       setLogLines([]);
       setCurrentStep("");
-      // Mark this sample as running in its inline panel immediately.
-      const key = sampleKey(samp.project, samp);
-      setSampleResults((m) => ({ ...m, [key]: { ...(m[key] || {}), status: "running" } }));
-      setOpenResults((m) => ({ ...m, [key]: true }));
 
       fetch("./api/run", {
         method: "POST",
@@ -514,7 +512,7 @@ export default function App() {
     });
   }
 
-  function streamLogUntilDone(id, samp, done) {
+  function streamLogUntilDone(id, _samp, done) {
     const es = new EventSource(`./api/jobs/${id}/log`);
     eventSourceRef.current = es;
     es.onmessage = (evt) => {
@@ -527,8 +525,8 @@ export default function App() {
           .then((job) => {
             setJobStatus(job.status);
             setCurrentStep("");
-            if (samp) loadSampleResults(samp.project, samp); // refresh this sample's inline results
-            loadProjects();                                  // refresh kraken_runs badges
+            results.reload();  // the finished sample lands in Kraken Results
+            loadProjects();    // refresh kraken_runs badges
           })
           .catch(() => {})
           .finally(() => done());
@@ -739,6 +737,10 @@ export default function App() {
 
         {/* ── Status strip ─────────────────────────────────────── */}
         <section className="status-strip">
+          <div className="status-item">
+            <span className="status-label">Project</span>
+            <span className="status-value">{activeProject || "—"}</span>
+          </div>
           <div className="status-item">
             <span className="status-label">Selected</span>
             <span className="status-value">
@@ -956,12 +958,10 @@ export default function App() {
                         )}
                         {visibleSamples(proj.name).map((s) => {
                           const key = sampleKey(proj.name, s);
-                          const res = sampleResults[key];
-                          const vres = vsnpResults[key];
                           const hasRun = proj.kraken_runs?.includes(s.sample);
-                          const status = res?.status || (hasRun ? "done" : "none");
+                          const isRunning = running && activeRun?.project === proj.name && activeRun?.sample === s.sample;
+                          const status = isRunning ? "running" : hasRun ? "done" : "none";
                           const checked = !!checkedKeys[key];
-                          const open = !!openResults[key];
                           const statusLabel =
                             status === "running" ? "● running" : status === "done" ? "✓ results" : "not run";
                           return (
@@ -978,9 +978,11 @@ export default function App() {
                               />
                               <div
                                 className="sample-name"
-                                title={`${s.sample} — click to show results`}
+                                title={hasRun
+                                  ? `${s.sample} — click to find this sample in Kraken Results below`
+                                  : `${s.sample} — no run yet; results appear in Kraken Results below after a run`}
                                 style={{ flex: 1, cursor: "pointer" }}
-                                onClick={() => toggleResults(proj.name, s)}
+                                onClick={() => jumpToResults(proj.name, s.sample)}
                               >
                                 {s.sample}
                               </div>
@@ -997,10 +999,13 @@ export default function App() {
                               <button
                                 className="ghost"
                                 style={{ fontSize: 11 }}
-                                onClick={() => toggleResults(proj.name, s)}
-                                title="Show/hide results for this sample"
+                                disabled={running || (!krakenOnly && !taxon.trim())}
+                                onClick={() => runSamples([{ project: proj.name, ...s }])}
+                                title={!krakenOnly && !taxon.trim()
+                                  ? "Enter a target taxon in Run Kraken first (or tick Kraken only)"
+                                  : `Run ${s.sample} now`}
                               >
-                                {open ? "▾" : "▸"}
+                                ▶
                               </button>
                             </div>
                             <div className="sample-files">
@@ -1024,113 +1029,6 @@ export default function App() {
                                 </div>
                               )}
                             </div>
-                            {open && (
-                              <div className="sample-results-inline" style={{ marginTop: 6, paddingLeft: 22 }}>
-                                <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
-                                  <button
-                                    className="ghost action"
-                                    disabled={running || (!krakenOnly && !taxon.trim())}
-                                    onClick={() => runSamples([{ project: proj.name, ...s }])}
-                                    title={!krakenOnly && !taxon.trim() ? "Enter a target taxon first (or tick Kraken only)" : ""}
-                                  >
-                                    {status === "done" ? "↻ Re-run this sample" : "▶ Run this sample"}
-                                  </button>
-                                  <button className="ghost action" onClick={() => loadSampleResults(proj.name, s)}>
-                                    ↻ Refresh
-                                  </button>
-                                </div>
-                                {res?.loading ? (
-                                  <div className="loading-text">Loading results…</div>
-                                ) : !res || !res.present || (res.files || []).length === 0 ? (
-                                  <div className="empty-msg" style={{ paddingLeft: 0 }}>
-                                    {status === "running"
-                                      ? "Running… results will appear here when finished."
-                                      : "No Kraken results yet for this sample."}
-                                  </div>
-                                ) : (
-                                  <div className="results-list">
-                                    {res.files.map((f) => {
-                                      const base = `./api/projects/${encodeURIComponent(proj.name)}/file?path=${encodeURIComponent(f.path)}`;
-                                      return (
-                                        <div key={f.name} className="results-item">
-                                          <span className="result-icon">{fileIcon(f.name)}</span>
-                                          {f.openable ? (
-                                            <a className="result-name result-link" href={`${base}&inline=1`}
-                                               target="_blank" rel="noopener noreferrer" title={`Open ${f.name}`}>
-                                              {f.label || f.name}
-                                            </a>
-                                          ) : (
-                                            <a className="result-name result-link" href={`${base}&inline=0`}
-                                               title={`Download ${f.name}`}>
-                                              {f.label || f.name}
-                                            </a>
-                                          )}
-                                          <span className="result-size">{fmtSize(f.size)}</span>
-                                          <a className="result-download" href={`${base}&inline=0`} title={`Download ${f.name}`}>⬇</a>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                )}
-
-                                {/* Cross-tool: vSNP results for this sample */}
-                                <div className="vsnp-cross-tool" style={{ marginTop: 10, borderTop: "1px solid var(--border, #e2e2e2)", paddingTop: 8 }}>
-                                  <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>vSNP results</div>
-                                  {vres?.loading ? (
-                                    <div className="loading-text">Loading vSNP results…</div>
-                                  ) : !vres || !vres.step1_present ? (
-                                    <div className="empty-msg" style={{ paddingLeft: 0 }}>No vSNP run for this sample yet.</div>
-                                  ) : (
-                                    <>
-                                      <div className="results-list">
-                                        {(vres.files || []).map((f) => {
-                                          const vbase = `./api/projects/${encodeURIComponent(proj.name)}/file?path=${encodeURIComponent(f.path)}`;
-                                          return (
-                                            <div key={f.relpath} className="results-item">
-                                              <span className="result-icon">{fileIcon(f.name)}</span>
-                                              {f.openable ? (
-                                                <a className="result-name result-link" href={`${vbase}&inline=1`}
-                                                   target="_blank" rel="noopener noreferrer" title={`Open ${f.name}`}>
-                                                  {f.relpath}
-                                                </a>
-                                              ) : (
-                                                <a className="result-name result-link" href={`${vbase}&inline=0`}
-                                                   title={`Download ${f.name}`}>
-                                                  {f.relpath}
-                                                </a>
-                                              )}
-                                              <span className="result-size">{fmtSize(f.size)}</span>
-                                              <a className="result-download" href={`${vbase}&inline=0`} title={`Download ${f.name}`}>⬇</a>
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                      {vres.step2 && vres.step2.present && (
-                                        <div className="vsnp-step2" style={{ marginTop: 6 }}>
-                                          {vres.step2.report_path ? (
-                                            <a className="result-name result-link"
-                                               href={`./api/projects/${encodeURIComponent(proj.name)}/file?path=${encodeURIComponent(vres.step2.report_path)}&inline=1`}
-                                               target="_blank" rel="noopener noreferrer"
-                                               title="Open the latest SNP comparison report this sample appears in">
-                                              📊 Latest SNP comparison{vres.step2.started_at ? ` (${vres.step2.started_at})` : ""}
-                                            </a>
-                                          ) : (
-                                            <span className="muted">
-                                              In latest SNP comparison{vres.step2.started_at ? ` (${vres.step2.started_at})` : ""}
-                                            </span>
-                                          )}
-                                          {vres.step2.groups && vres.step2.groups.length > 0 && (
-                                            <span className="muted" style={{ marginLeft: 6 }}>
-                                              — group{vres.step2.groups.length > 1 ? "s" : ""}: {vres.step2.groups.join(", ")}
-                                            </span>
-                                          )}
-                                        </div>
-                                      )}
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                            )}
                           </div>
                           );
                         })}
@@ -1254,8 +1152,8 @@ export default function App() {
                 </div>
                 {Object.keys(checkedKeys).length === 0 ? (
                   <div className="empty-msg">
-                    Check one or more samples on the left, then run them as a batch from “Run Kraken” below.
-                    Click a sample’s name to view its results inline.
+                    Check one or more samples on the left, then run them as a batch from “Run Kraken &amp; Results” below.
+                    Click a sample’s name to find it in the Kraken Results table.
                   </div>
                 ) : (
                   <div className="selection-box">
@@ -1276,18 +1174,19 @@ export default function App() {
         )}
 
         {/* ════════════════════════════════════════════════════════ */}
-        {/* SECTION: Run Kraken — configure + results               */}
+        {/* SECTION: Run Kraken — run panel LEFT, results table RIGHT */}
+        {/* (the vSNP Step 1 rhythm: run a sample, find it beside you) */}
         {/* ════════════════════════════════════════════════════════ */}
         <div className="row-header">
-          <h2>Run Kraken</h2>
+          <h2>Run Kraken &amp; Results</h2>
           <button className="ghost" onClick={() => setShowRun(!showRun)}>
             {showRun ? "Hide" : "Show"}
           </button>
         </div>
         {showRun && (
-          <div className="row-grid row-grid-single">
+          <div className="row-grid row-grid-run">
             {/* LEFT — configure & run */}
-            <section className="panel">
+            <section className="panel run-panel">
               <h2>Configure &amp; Run</h2>
 
               <div className="form-section">
@@ -1400,68 +1299,49 @@ export default function App() {
                   : `▶ Run selected${Object.keys(checkedKeys).length ? ` (${Object.keys(checkedKeys).length})` : ""}`}
               </button>
               {Object.keys(checkedKeys).length === 0 && (
-                <div className="note">Check one or more samples on the left to enable the run. (Or use “Run this sample” under any sample.)</div>
+                <div className="note">Check one or more samples in Projects &amp; Samples to enable the run — or use a sample row’s ▶ button.</div>
               )}
               {!krakenOnly && !taxon.trim() && Object.keys(checkedKeys).length > 0 && (
                 <div className="note">Enter a target taxon above (or tick “Kraken only”) to enable the run.</div>
               )}
-            </section>
 
-            {/* RIGHT — current run status (per-sample results live inline at left) */}
-
-          </div>
-        )}
-
-        {/* ════════════════════════════════════════════════════════ */}
-        {/* SECTION: Pipeline Log                                   */}
-
-        {/* ════════════════════════════════════════════════════════ */}
-        {/* SECTION: Results — every completed sample, not just the last  */}
-        {/* ════════════════════════════════════════════════════════ */}
-        <div className="row-header">
-          <h2>Results</h2>
-          <button className="ghost" onClick={() => setShowResultsPane(!showResultsPane)}>
-            {showResultsPane ? "Hide" : "Show"}
-          </button>
-        </div>
-        {showResultsPane && (
-          <div className="row-grid row-grid-split">
-            {/* LEFT — Current Run (live status for the batch in flight) */}
-<section className="panel">
-              <div className="panel-header">
-                <h2>Current Run</h2>
-                {jobId && <span className="muted" style={{ fontSize: 12 }}>job {jobId.slice(0, 8)}</span>}
-              </div>
-              {activeRun ? (
-                <div className="selection-box">
+              {/* Live status of the run in flight — the finished sample lands
+                  in Kraken Results on the right. */}
+              {activeRun && (
+                <div className="selection-box" style={{ marginTop: 12 }}>
                   <div className="sel-title">
                     {jobStatus === "running" ? "Running" : jobStatus === "succeeded" ? "Done" : jobStatus}
                     {queueInfo.total > 1 ? ` — ${queueInfo.done}/${queueInfo.total} in batch` : ""}
+                    {jobId && <span className="muted" style={{ fontWeight: 400, marginLeft: 8, fontSize: 11 }}>job {jobId.slice(0, 8)}</span>}
                   </div>
                   <div><span className="sel-name">{activeRun.sample}</span></div>
                   <div style={{ marginTop: 2 }}>
                     <span className="muted">Project:</span> <strong>{activeRun.project}</strong>
                   </div>
                   {currentStep && <div className="muted" style={{ marginTop: 4 }}>{currentStep}</div>}
-                  <div className="note" style={{ marginTop: 8 }}>
-                    Output files appear inline under each sample on the left (click a sample’s name to expand).
+                  <div className="note" style={{ marginTop: 8, marginBottom: 0 }}>
+                    When it finishes, the sample appears in Kraken Results on the right.
                   </div>
-                </div>
-              ) : (
-                <div className="empty-msg">
-                  No active run. Results for any sample are shown inline under that sample on the left.
                 </div>
               )}
             </section>
-            {/* RIGHT — every completed sample, searchable (vSNP Step 1 model) */}
-            <ResultsPane
-              project={activeProject}
-              results={results}
-              columns={RESULT_COLUMNS}
-              labels={{ entity: "sample", sampleHeader: "Sample" }}
-            />
+
+            {/* RIGHT — every completed sample, searchable (the vSNP Step 1
+                Results model): run on the left, find the sample here. */}
+            <div ref={resultsAnchorRef} style={{ minWidth: 0 }}>
+              <ResultsPane
+                title="Kraken Results"
+                project={activeProject}
+                results={results}
+                columns={resultColumns}
+                labels={{ entity: "sample", sampleHeader: "Sample" }}
+              />
+            </div>
           </div>
         )}
+
+        {/* ════════════════════════════════════════════════════════ */}
+        {/* SECTION: Pipeline Log                                   */}
         {/* ════════════════════════════════════════════════════════ */}
         <div className="row-header">
           <h2>Pipeline Log</h2>

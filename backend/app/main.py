@@ -1637,10 +1637,13 @@ def _rp_metrics(run_dir: Path) -> Dict[str, Any]:
     }
 
 
-_RP_CROSS_PROBES = [
-    ("kraken", "krona", "\U0001F4CA Krona", "kraken", "*_krona.html",
-     "./api/projects/{p}/kraken/samples/{s}/krona"),
-]
+# No cross-tool probes: the entry the shared scaffold shipped with pointed at
+# this tool's OWN Krona chart through a route that only exists in the vSNP
+# backend (/api/projects/{p}/kraken/samples/{s}/krona), so every sample with a
+# Krona grew a dead "from kraken" link in the Files cell. The Krona chart is a
+# first-class file of this tool's runs — it is in `files` (and the pane's
+# quick-open column) already.
+_RP_CROSS_PROBES: List = []
 
 
 def _rp_cross_tool(project: str, project_dir: Path, sample: str) -> List[Dict]:

@@ -342,6 +342,21 @@
     <p class="provided">Results provided by: {{ (report.parameters.blast_db or "BLAST database").split("/")[-1] }} database</p>
   </section>
 
+  {% if legacy.coverage_interactive %}
+  <section class="page">
+    {{ date_header() }}
+    {{ banner("Coverage &amp; Variants") }}
+    <p class="note">
+      Per-position read depth for each reference, with a diamond at every variant position.
+      Directly beneath each diamond a stacked bar shows what the reads at that position actually
+      were, coloured by nucleotide (A green, C blue, G yellow, T red) in proportion — so a 50/50
+      G/A call is a half-yellow, half-green bar. Shaded red spans have no coverage; the dashed
+      line is 100X. Drag to zoom into any region; double-click resets.
+    </p>
+    <div class="coverage-interactive">{{ legacy.coverage_interactive|safe }}</div>
+  </section>
+  {% endif %}
+
   {% for figure in legacy.coverage_figures %}
   <section class="page">
     {{ date_header() }}

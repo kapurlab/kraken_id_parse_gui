@@ -288,6 +288,20 @@ def _coverage_figures(output_dir: Path) -> List[Dict[str, Any]]:
     return figures
 
 
+def _coverage_interactive(output_dir: Path) -> str:
+    """The newest interactive Coverage & Variants fragment, inlined into the
+    report body. Empty string when the run predates it or plotly was absent —
+    the static figure section then stands alone, exactly as before."""
+    frags = sorted(output_dir.glob("*-coverage_interactive.html"),
+                   key=lambda p: p.stat().st_mtime)
+    if not frags:
+        return ""
+    try:
+        return frags[-1].read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def _coverage_stats(output_dir: Path) -> List[Dict[str, Any]]:
     stats_files = sorted(output_dir.glob("*-coverage_stats.json"), key=lambda path: path.stat().st_mtime)
     if not stats_files:
@@ -350,6 +364,7 @@ def collect_legacy_report(output_dir: Path) -> Dict[str, Any]:
         "blast_rows": _read_blast_rows(output_dir),
         "fasta_summary": _fasta_summary(output_dir),
         "coverage_figures": _coverage_figures(output_dir),
+        "coverage_interactive": _coverage_interactive(output_dir),
         "coverage_stats": _coverage_stats(output_dir),
         "krona": _linked_artifacts(output_dir, "krona"),
     }

@@ -72,6 +72,10 @@ DEFAULTS: Dict[str, Any] = {
     # active one; entries are removable in Settings. The vSNP GUI reads this
     # same list to offer per-run DB switching.
     "saved_kraken_dbs": [],
+    # The same idea for BLAST databases. blast_db is the active one; the vSNP
+    # GUI reads this list so a Kraken run launched from THERE can pick a BLAST
+    # database too, instead of silently using whatever this tool last set.
+    "saved_blast_dbs": [],
 }
 
 
@@ -85,6 +89,16 @@ def load_config() -> Dict[str, Any]:
     # discovered on disk anymore), so a config written before that list existed
     # gets its working databases carried into it — once. A key that is present
     # but empty means the user removed everything; that choice is respected.
+    # Same one-time seed for BLAST databases: a config written before the list
+    # existed carries its working database into it once.
+    if "saved_blast_dbs" not in cfg:
+        seed_b = []
+        for cand in (cfg.get("blast_db", ""), DEFAULTS.get("blast_db", "")):
+            cand = str(cand or "").strip()
+            if cand and cand not in seed_b:
+                seed_b.append(cand)
+        cfg["saved_blast_dbs"] = seed_b
+        save_config(cfg)
     if "saved_kraken_dbs" not in cfg:
         seed = []
         for cand in (cfg.get("kraken_db", ""), DEFAULTS.get("kraken_db", "")):

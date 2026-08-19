@@ -71,6 +71,11 @@ export default function App() {
   const [knownDbs, setKnownDbs] = useState([]);   // [{name, path, size_bytes, missing?}]
   const [newDbPath, setNewDbPath] = useState("");  // "Add database location" input
   const [addDbError, setAddDbError] = useState("");
+  // Saved BLAST databases, managed the same way as the Kraken2 list. The vSNP
+  // GUI reads this list too, so a Kraken run launched from there can pick one.
+  const [knownBlastDbs, setKnownBlastDbs] = useState([]);
+  const [newBlastDbPath, setNewBlastDbPath] = useState("");
+  const [addBlastDbError, setAddBlastDbError] = useState("");
   const [running, setRunning] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [jobStatus, setJobStatus] = useState("idle"); // idle | running | succeeded | failed
@@ -575,6 +580,52 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : { databases: [] }))
       .then((data) => setKnownDbs(data.databases || []))
       .catch(() => {});
+    fetch("./api/blast-dbs")
+      .then((r) => (r.ok ? r.json() : { databases: [] }))
+      .then((data) => setKnownBlastDbs(data.databases || []))
+      .catch(() => {});
+  }
+
+  function addBlastDbLocation() {
+    const p = (newBlastDbPath || "").trim();
+    if (!p) return;
+    setAddBlastDbError("");
+    fetch("./api/blast-dbs/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: p }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((e) => { throw new Error(e.detail || "Could not add database"); })))
+      .then((d) => {
+        setNewBlastDbPath("");
+        setSettingsDraft((prev) => ({
+          ...prev,
+          saved_blast_dbs: d.saved,
+          blast_db: prev.blast_db || p,
+        }));
+        if (!(settingsDraft.blast_db || "").trim()) setBlastDb(p);
+        loadKnownDbs();
+      })
+      .catch((err) => setAddBlastDbError(err.message));
+  }
+
+  function removeSavedBlastDb(p) {
+    fetch("./api/blast-dbs/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: p }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        setSettingsDraft((prev) => ({
+          ...prev,
+          saved_blast_dbs: d.saved,
+          blast_db: d.cleared_active ? "" : prev.blast_db,
+        }));
+        if (d.cleared_active) setBlastDb("");
+        loadKnownDbs();
+      })
+      .catch(() => {});
   }
 
   function saveSettings() {
@@ -587,6 +638,7 @@ export default function App() {
         projects_root: settingsDraft.projects_root,
         saved_project_roots: settingsDraft.saved_project_roots,
         saved_kraken_dbs: settingsDraft.saved_kraken_dbs,
+        saved_blast_dbs: settingsDraft.saved_blast_dbs,
       }),
     })
       .then((r) => r.json())
@@ -825,17 +877,52 @@ export default function App() {
                 ) : null}
                 <div className="form-hint">
                   Only databases added here (and in the per-run picker) appear in the dropdowns — nothing is
-                  auto-discovered. “Use” makes one active for new runs; remember to click Save.
+                  auto-discovered. “Use” makes one active for new runs; remember to click Save &amp; Refresh.
                 </div>
               </div>
               <div className="form-section">
-                <label className="form-label">BLAST database path or name</label>
-                <input
-                  placeholder="nt"
-                  value={settingsDraft.blast_db || ""}
-                  onChange={(e) => setSettingsDraft((d) => ({ ...d, blast_db: e.target.value }))}
-                />
-                <div className="form-hint">Use "nt" for NCBI remote, or an absolute path to a local BLAST db</div>
+                <label className="form-label">BLAST databases</label>
+                {(settingsDraft.saved_blast_dbs || []).length ? (
+                  (settingsDraft.saved_blast_dbs || []).map((p) => {
+                    const info = knownBlastDbs.find((d) => d.path === p);
+                    return (
+                      <div key={p} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginBottom: 3 }}>
+                        <span style={{ flex: 1, wordBreak: "break-all", opacity: p === settingsDraft.blast_db ? 1 : 0.8 }}>
+                          {p}
+                          {info && info.remote ? " (NCBI remote)" : ""}
+                          {info && info.size_bytes ? ` (${(info.size_bytes / 1073741824).toFixed(1)} GB)` : ""}
+                          {info && info.missing ? " ⚠ missing" : ""}
+                          {p === settingsDraft.blast_db ? "  ← active" : ""}
+                        </span>
+                        <button type="button" className="ghost" title="Use this database"
+                          onClick={() => setSettingsDraft((d) => ({ ...d, blast_db: p }))}
+                          disabled={p === settingsDraft.blast_db}>Use</button>
+                        <button type="button" className="ghost" title="Remove from this list (does not delete anything on disk)"
+                          onClick={() => removeSavedBlastDb(p)}>✕</button>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="form-hint">No BLAST databases yet — add one below.</div>
+                )}
+                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                  <input
+                    style={{ flex: 1 }}
+                    placeholder="/path/to/blast/ref_prok_rep_genomes   or   nt"
+                    value={newBlastDbPath}
+                    onChange={(e) => { setNewBlastDbPath(e.target.value); setAddBlastDbError(""); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addBlastDbLocation(); } }}
+                  />
+                  <button type="button" onClick={addBlastDbLocation} disabled={!(newBlastDbPath || "").trim()}>Add</button>
+                </div>
+                {addBlastDbError ? (
+                  <div className="form-hint" style={{ color: "var(--danger, #b00020)" }}>{addBlastDbError}</div>
+                ) : null}
+                <div className="form-hint">
+                  A BLAST database is a file <em>prefix</em>, not a folder — end the path with the database
+                  name itself (…/blast/ref_prok_rep_genomes). Use “nt” for NCBI remote. These entries are
+                  what the vSNP GUI offers when it runs Kraken ID Parse.
+                </div>
               </div>
               <div className="form-section">
                 <label className="form-label">Personal projects root</label>
@@ -861,10 +948,10 @@ export default function App() {
                       disabled={!(settingsDraft.saved_project_roots || []).includes(settingsDraft.projects_root)}>Remove</button>
                   </span>
                 </div>
-                <div className="form-hint">New projects are created under this root. Projects in the site’s shared projects folder are always visible. Click Save to apply.</div>
+                <div className="form-hint">New projects are created under this root. Projects in the site’s shared projects folder are always visible. Click Save &amp; Refresh to apply.</div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                <button onClick={saveSettings}>Save</button>
+                <button onClick={saveSettings} title="Save these settings and reload the app with them — a new path only takes effect once this is clicked">Save &amp; Refresh</button>
               </div>
             </section>
           </div>
@@ -1281,6 +1368,21 @@ export default function App() {
 
               <div className="form-section">
                 <label className="form-label">BLAST DB path (or name)</label>
+                {knownBlastDbs.length ? (
+                  <select
+                    value={knownBlastDbs.some((d) => d.path === blastDb) ? blastDb : ""}
+                    onChange={(e) => { if (e.target.value) setBlastDb(e.target.value); }}
+                    disabled={running || krakenOnly || noBlast}
+                    style={{ marginBottom: 6 }}
+                  >
+                    <option value="">— switch to a saved database (managed in Settings) —</option>
+                    {knownBlastDbs.map((d) => (
+                      <option key={d.path} value={d.path}>
+                        {d.name}{d.remote ? " (NCBI remote)" : ""}{d.missing ? " ⚠ missing" : ""} — {d.path}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
                 <input
                   placeholder="nt  or  /path/to/blast_db"
                   value={blastDb}

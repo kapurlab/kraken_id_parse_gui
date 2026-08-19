@@ -1008,6 +1008,128 @@ def api_kraken_dbs_remove(payload: DbPathPayload):
     return JSONResponse({"ok": True, "saved": cfg["saved_kraken_dbs"], "cleared_active": cleared})
 
 
+def _blast_db_entry(p: str) -> Dict[str, Any]:
+    """One dropdown entry for a BLAST database.
+
+    A BLAST database is a file PREFIX, not a directory: `/db/blast/nt` is
+    backed by nt.nhr / nt.nin / nt.nsq (or nt.00.nhr … plus an nt.nal alias
+    for a volume set). A bare name with no path separator (`nt`, `nr`) is
+    NCBI's remote database, which needs nothing on disk.
+    """
+    entry: Dict[str, Any] = {"name": Path(p).name, "path": p, "size_bytes": 0,
+                             "remote": "/" not in p}
+    if entry["remote"]:
+        return entry
+    d = Path(p)
+    try:
+        vols = [f for f in d.parent.glob(d.name + ".*")
+                if f.is_file() and re.search(r"\.(\d+\.)?[np][a-z]{2}$", f.name)]
+        if vols:
+            entry["size_bytes"] = sum(f.stat().st_size for f in vols)
+        else:
+            entry["missing"] = True
+    except OSError:
+        entry["missing"] = True
+    return entry
+
+
+@app.get("/api/blast-dbs")
+def api_blast_dbs():
+    """BLAST databases for the settings/run dropdowns: the paths the user has
+    added (``saved_blast_dbs``) plus the active one. Managed explicitly, like
+    the Kraken2 list — nothing is discovered on disk."""
+    cfg = load_config()
+    current = (cfg.get("blast_db") or "").strip()
+    saved = [str(p).strip() for p in (cfg.get("saved_blast_dbs") or []) if str(p).strip()]
+    dbs: List[Dict[str, Any]] = []
+    seen: set = set()
+    for p in (*saved, current):
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        dbs.append(_blast_db_entry(p))
+    return JSONResponse({"databases": dbs, "current": current, "saved": saved})
+
+
+def _validate_blast_db(p: str) -> None:
+    """Raise HTTPException unless `p` looks like a usable BLAST database."""
+    if "/" not in p:
+        return  # bare name — NCBI remote (nt, nr); nothing to check on disk
+    d = Path(p)
+    if d.is_dir():
+        raise HTTPException(
+            400,
+            f"{p} is a directory. A BLAST database is a file PREFIX — include the "
+            "database name itself (e.g. .../blast/ref_prok_rep_genomes).",
+        )
+    try:
+        vols = [f for f in d.parent.glob(d.name + ".*")
+                if f.is_file() and re.search(r"\.(\d+\.)?[np][a-z]{2}$", f.name)]
+    except OSError:
+        vols = []
+    if not vols:
+        raise HTTPException(
+            400,
+            f"No BLAST database files found for prefix {p} (expected {d.name}.nhr / "
+            f".nin / .nsq, or a {d.name}.nal volume alias beside it).",
+        )
+
+
+@app.post("/api/blast-dbs/add")
+def api_blast_dbs_add(payload: DbPathPayload):
+    """Add one BLAST database to the saved list, validating it up front so a
+    typo is an error here rather than a failed run an hour into a pipeline."""
+    p = (payload.path or "").strip().rstrip("/")
+    if not p:
+        raise HTTPException(400, "A database path or name is required.")
+    _validate_blast_db(p)
+    cfg = load_config()
+    saved = [str(x).strip() for x in (cfg.get("saved_blast_dbs") or []) if str(x).strip()]
+    if p not in saved:
+        saved.append(p)
+        cfg["saved_blast_dbs"] = saved
+        save_config(cfg)
+    return JSONResponse({"ok": True, "saved": saved})
+
+
+@app.post("/api/blast-dbs/remove")
+def api_blast_dbs_remove(payload: DbPathPayload):
+    """Remove one BLAST database from the saved list (nothing on disk is
+    touched); clear the active choice if that is what was removed."""
+    p = (payload.path or "").strip()
+    cfg = load_config()
+    saved = [str(x).strip() for x in (cfg.get("saved_blast_dbs") or []) if str(x).strip()]
+    cfg["saved_blast_dbs"] = [x for x in saved if x != p]
+    cleared = False
+    if (cfg.get("blast_db") or "").strip() == p:
+        cfg["blast_db"] = ""
+        cleared = True
+    save_config(cfg)
+    return JSONResponse({"ok": True, "saved": cfg["saved_blast_dbs"], "cleared_active": cleared})
+
+
+def _remember_blast_db(cfg: Dict[str, Any], db_path: str) -> bool:
+    """Remember a BLAST database actually run with, so it is a dropdown pick
+    next time. Returns True when the config changed."""
+    db_path = (db_path or "").strip()
+    if not db_path:
+        return False
+    if "/" in db_path:
+        d = Path(db_path)
+        try:
+            if not any(f.is_file() and re.search(r"\.(\d+\.)?[np][a-z]{2}$", f.name)
+                       for f in d.parent.glob(d.name + ".*")):
+                return False
+        except OSError:
+            return False
+    saved = [str(p).strip() for p in (cfg.get("saved_blast_dbs") or []) if str(p).strip()]
+    if db_path in saved:
+        return False
+    saved.append(db_path)
+    cfg["saved_blast_dbs"] = saved
+    return True
+
+
 def _remember_kraken_db(cfg: Dict[str, Any], db_path: str) -> bool:
     """Add a Kraken DB path to the remembered list (saved_kraken_dbs) so
     switching databases later is a pick, not a re-type. Returns True if the
@@ -1031,6 +1153,7 @@ class ConfigPayload(BaseModel):
     shared_projects_root: Optional[str] = None
     saved_project_roots: Optional[List[str]] = None
     saved_kraken_dbs: Optional[List[str]] = None
+    saved_blast_dbs: Optional[List[str]] = None
 
 
 @app.post("/api/config")
@@ -1112,7 +1235,11 @@ def api_run(payload: RunPayload):
     taxon = (payload.taxon or "").strip()
     # Remember any DB actually run with, so it's a dropdown pick next time —
     # including ad-hoc per-run overrides typed into the run form.
-    if _remember_kraken_db(cfg, kraken_db):
+    remembered = _remember_kraken_db(cfg, kraken_db)
+    # Only full runs actually BLAST; don't remember a DB a skipped step never used.
+    if not payload.kraken_only and not payload.no_blast:
+        remembered = _remember_blast_db(cfg, blast_db) or remembered
+    if remembered:
         save_config(cfg)
 
     # Taxon drives the read-parsing/assembly/BLAST identification, which
@@ -1308,6 +1435,8 @@ def _result_category(rel: str) -> Optional[str]:
         return "krona"
     if name.endswith("-bracken.xlsx"):
         return "bracken"
+    if name.endswith("-coverage_interactive.html"):
+        return "coverage_interactive"
     if name.endswith("_blast_summary.txt") or name == "consensus_blast_summary.txt":
         return "blast_summary"
     if name.endswith("_denovo.fasta"):
@@ -1331,6 +1460,7 @@ _CATEGORY_ORDER = {
     "blast_summary": 4,
     "denovo_fasta": 5,
     "reference_fasta": 6,
+    "coverage_interactive": 6.5,
     "coverage_pdf": 7,
     "bracken": 8,
     "log": 99,
@@ -1338,6 +1468,8 @@ _CATEGORY_ORDER = {
 
 
 def _result_label(rel: str, category: Optional[str]) -> str:
+    if category == "coverage_interactive":
+        return "Coverage & Variants (interactive)"
     if category == "report_pdf":
         return "Report PDF"
     if category == "report_html":

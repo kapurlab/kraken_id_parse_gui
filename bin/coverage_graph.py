@@ -268,6 +268,40 @@ class Coverage_Graph(Setup):
         self.output_png = output_png
         self.output_stats_json = output_stats_json
 
+        # Interactive Coverage & Variants charts for the HTML report. Built
+        # from data already in hand (the sorted BAM, the depth table and the
+        # reference sequences), so this adds an allele pileup and nothing else.
+        # Best-effort: any failure leaves the static PNG/PDF above untouched.
+        self.output_interactive_html = None
+        try:
+            import coverage_interactive
+            ref_seqs = {}
+            for record in SeqIO.parse(temp_reference, "fasta"):
+                ref_seqs[record.id] = str(record.seq)
+            depth_by_ref = {}
+            for column in table.columns:
+                series = table[column].fillna(0)
+                # table is indexed by the positions samtools depth reported, so
+                # reindex onto 1..length to make uncovered positions real zeros.
+                length = len(ref_seqs.get(column, "")) or int(series.index.astype(int).max() or 0)
+                vals = [0.0] * length
+                for pos, depth in series.items():
+                    try:
+                        i = int(pos) - 1
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= i < length:
+                        vals[i] = float(depth)
+                depth_by_ref[column] = vals
+            headers = {r: st.get("header", r) for r, st in self.alignment_stats.items()}
+            out_html = f'{sample_name}-{random_part}-coverage_interactive.html'
+            self.output_interactive_html = coverage_interactive.build_charts(
+                sample_name, sorted_bam, ref_seqs, depth_by_ref, headers, Path(out_html))
+            if self.output_interactive_html:
+                print(f'Interactive coverage chart: {self.output_interactive_html}')
+        except Exception as exc:  # noqa: BLE001
+            print(f'WARNING: interactive coverage chart not built: {exc}')
+
         if self.debug:
             print(f"\nCreated coverage graph: {output_pdf}")
         

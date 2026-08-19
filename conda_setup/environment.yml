@@ -47,6 +47,8 @@ dependencies:
   - dask
   - humanize          # fastq_stats_seqkit.py imports this at module load
   - pysam             # coverage_graph.py (unguarded import)
+  - weasyprint        # HTML->PDF for the report (no browser needed; the
+                      # headless-Chromium routes are kept as fallbacks)
   - plotly <6         # interactive Coverage & Variants charts in the HTML report
                       # (guarded: without it the report keeps the static figure)
   - pyyaml            # run_with_config.py (unguarded import)

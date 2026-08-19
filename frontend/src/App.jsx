@@ -132,6 +132,8 @@ export default function App() {
       {
         key: "quick_open",
         label: "Open",
+        // A pair of links has no comparable value behind it.
+        sortable: false,
         render: (row) => {
           const krona = fileHref(row, ["krona"]);
           const reportHtml = fileHref(row, ["report_html"]);

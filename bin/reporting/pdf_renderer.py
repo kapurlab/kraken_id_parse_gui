@@ -221,6 +221,25 @@ def _render_with_browser_cli(html_path: Path, pdf_path: Path) -> Optional[str]:
     return None
 
 
+def _render_with_weasyprint(html_path: Path, pdf_path: Path) -> Optional[str]:
+    """Render with WeasyPrint — the suite's standard HTML-to-PDF path.
+
+    Tried first because it needs no browser at all: the headless-Chromium
+    routes below only work where a browser happens to be installed, which on a
+    compute node it usually is not. WeasyPrint renders with PRINT media, so the
+    interactive Plotly block hides itself and the static coverage figures beside
+    it carry the same information into the PDF."""
+    try:
+        from weasyprint import HTML
+    except Exception as exc:  # noqa: BLE001 — import fails without native libs
+        return f"WeasyPrint not installed ({exc})"
+    try:
+        HTML(filename=str(html_path)).write_pdf(str(pdf_path))
+        return None
+    except Exception as exc:  # noqa: BLE001
+        return f"WeasyPrint failed to render the report: {exc}"
+
+
 def render_pdf_report(html_path: Path, output_dir: Path) -> Tuple[Optional[Path], Optional[str]]:
     """Render report.html to report.pdf when enabled.
 
@@ -234,6 +253,9 @@ def render_pdf_report(html_path: Path, output_dir: Path) -> Tuple[Optional[Path]
     if pdf_path.exists():
         pdf_path.unlink()
 
+    warning = _render_with_weasyprint(html_path, pdf_path)
+    if warning is None:
+        return pdf_path, None
     warning = _render_with_playwright(html_path, pdf_path)
     if warning and "not installed" in warning:
         warning = _render_with_chrome_cdp(html_path, pdf_path)

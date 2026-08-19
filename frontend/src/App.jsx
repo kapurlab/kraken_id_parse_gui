@@ -103,11 +103,19 @@ export default function App() {
   // one-click links to a sample's Krona chart and run report — the files a
   // diagnostician opens first, without digging through the Files cell.
   const resultColumns = useMemo(() => {
+    // Resolve in the ORDER THE CALLER LISTED, not the order the row happens to
+    // hold: the files array is sorted for display, so a plain find() returned
+    // whichever category sorted first — which is how the Report link kept
+    // opening the PDF when an interactive HTML report sat right beside it.
     const fileHref = (row, cats) => {
-      const f = (row.files || []).find((x) => cats.includes(x.category));
-      return f
-        ? `./api/projects/${encodeURIComponent(activeProject)}/file?path=${encodeURIComponent(f.path)}&inline=1`
-        : null;
+      const files = row.files || [];
+      for (const cat of cats) {
+        const f = files.find((x) => x.category === cat);
+        if (f) {
+          return `./api/projects/${encodeURIComponent(activeProject)}/file?path=${encodeURIComponent(f.path)}&inline=1`;
+        }
+      }
+      return null;
     };
     return [
       { key: "top_taxon", label: "Top taxon" },
@@ -118,7 +126,8 @@ export default function App() {
         label: "Open",
         render: (row) => {
           const krona = fileHref(row, ["krona"]);
-          const report = fileHref(row, ["report_html", "report_pdf"]);
+          const reportHtml = fileHref(row, ["report_html"]);
+          const report = reportHtml || fileHref(row, ["report_pdf"]);
           if (!krona && !report) return "—";
           return (
             <span style={{ display: "inline-flex", gap: 8, whiteSpace: "nowrap" }}>
@@ -128,7 +137,11 @@ export default function App() {
               )}
               {report && (
                 <a href={report} target="_blank" rel="noopener noreferrer"
-                   title="Open this sample's run report">📄 Report</a>
+                   title={reportHtml
+                     ? "Open this sample's interactive HTML report"
+                     : "Open this sample's PDF report (no HTML report in this run)"}>
+                  {reportHtml ? "📄 Report" : "📄 Report (PDF)"}
+                </a>
               )}
             </span>
           );

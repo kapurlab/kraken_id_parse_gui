@@ -1453,8 +1453,10 @@ def _result_category(rel: str) -> Optional[str]:
 
 
 _CATEGORY_ORDER = {
-    "report_pdf": 0,
-    "report_html": 1,
+    # HTML first: it is the primary report (it carries the interactive
+    # Coverage & Variants charts); the PDF is its print rendering.
+    "report_html": 0,
+    "report_pdf": 1,
     "stats": 2,
     "krona": 3,
     "blast_summary": 4,

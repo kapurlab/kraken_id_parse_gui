@@ -113,6 +113,16 @@ class Setup:
         # Set up additional attributes
         self.startTime = datetime.now()
         self.cpus = max(1, multiprocessing.cpu_count() - 2)
+        # A dashboard session (or Slurm allocation) declares a core budget for
+        # every tool it launches. Without this cap a single kraken2/bwa/blastn
+        # run asks for every core on a shared box, and a room of concurrent
+        # users turns into thread-thrash. Absent the variables, standalone
+        # behavior is unchanged.
+        for _var in ("BDTOOLS_SESSION_CORES", "SLURM_CPUS_PER_TASK"):
+            _val = os.environ.get(_var, "").strip()
+            if _val.isdigit() and int(_val) > 0:
+                self.cpus = max(1, min(self.cpus, int(_val)))
+                break
         self.date_stamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         
         if self.debug:

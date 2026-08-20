@@ -12,7 +12,7 @@ import argparse
 import textwrap
 import humanize
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
+from file_setup import Setup, bcolors, Excel_Stats, safe_move
 
 class FASTQ_Container:
     """Provide nested dot notation to object for each read with stats"""
@@ -118,40 +118,6 @@ class FASTQ_Stats(Setup):
         if len(files_to_process) == 1:
             self.R2 = None
 
-    def latex(self, tex):
-        blast_banner = Banner("FASTQ Quality")
-        print(r'\begin{table}[H]', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\small', file=tex)
-        print(r'\begin{tabular}{ l | l | l }', file=tex)
-        
-        if self.R2:
-            print('Filename & ' + os.path.basename(self.R1.file_name).replace("_", "\_") + ' & ' + os.path.basename(self.R2.file_name).replace("_", "\_") + ' \\\\', file=tex)
-            print(r'\hline', file=tex)
-            print(f'File Size & {self.R1.file_size} & {self.R2.file_size} \\\\', file=tex)
-            print(f'Q30 Passing & {self.R1.passQ30}\% & {self.R2.passQ30}\% \\\\', file=tex)
-            print(f'Mean Read Score & {float(self.R1.read_quality_average):0.1f} & {float(self.R2.read_quality_average):0.1f} \\\\', file=tex)
-            print(f'Average Read Length & {self.R1.avg_len} & {self.R1.avg_len} \\\\', file=tex)
-        else:
-            print('Filename & ' + os.path.basename(self.R1.file_name).replace("_", "\_") + ' & Read 2 \\\\', file=tex)
-            print(r'\hline', file=tex)
-            print(f'File Size & {self.R1.file_size} & N/A \\\\', file=tex)
-            print(f'Q30 Passing & {self.R1.passQ30}\% & N/A \\\\', file=tex)
-            print(f'Mean Read Score & {float(self.R1.read_quality_average):0.1f} & N/A \\\\', file=tex)
-            print(f'Average Read Length & {self.R1.avg_len} & N/A \\\\', file=tex)
-        
-        print(r'\hline', file=tex)
-        # Environments must close in LIFO order: tabular (innermost) before the
-        # adjustbox that wraps it. Closing adjustbox first left tabular open and
-        # aborted the whole PDF ("Something's wrong--perhaps a missing \item").
-        print(r'\end{tabular}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\vspace{0.1 mm}', file=tex)
-        print(r'\end{table}', file=tex)
-    
     def excel(self, excel_dict):
         excel_dict['FASTQ_R1'] = os.path.basename(self.R1.file_name)
         excel_dict['R1 File Size'] = self.R1.file_size
@@ -216,10 +182,6 @@ def main():
         R2 Mean Read Score: {bcolors.WHITE}{fastq_stats.R2.read_quality_average}{bcolors.ENDC} \n \
         R2 Average Read Length: {bcolors.WHITE}{fastq_stats.R2.avg_len}{bcolors.ENDC} \n')
 
-    #Latex report
-    latex_report = Latex_Report(fastq_stats.sample_name)
-    fastq_stats.latex(latex_report.tex)
-    latex_report.latex_ending()
 
     #Excel Stats
     excel_stats = Excel_Stats(fastq_stats.sample_name)

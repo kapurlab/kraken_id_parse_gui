@@ -13,7 +13,7 @@ from datetime import datetime
 
 from Bio import SeqIO
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
+from file_setup import Setup, bcolors, Excel_Stats, safe_move
 
 
 # DB prefixes already pulled into the page cache by this process, so the two or
@@ -329,44 +329,6 @@ class Blast_Fasta(Setup, bcolors):
             print(f"{bcolors.YELLOW}Warning: Could not detect HPC system. Using default settings.{bcolors.ENDC}")
             return "unknown"
 
-    def latex(self, tex):
-        blast_string_int = {k: int(v) for k, v in self.summary_dict.items()}
-        blast_sorted = sorted(blast_string_int.items(), key=operator.itemgetter(1), reverse=True)
-        self.blast_sorted = blast_sorted
-        table_breaks = [0, 55, 110, 165, 220, 275, 330, 385, 440, 495, 550, 605, 660, 715, 770, 825, 880, 935, 990, 1045, 1100, 1155, 1210]
-        count = 0
-        basename = os.path.basename(self.blast_db)
-        # basename = basename.replace("_", "\_")
-        blast_banner = Banner(f'BLAST {basename} - Assembly Identification')
-        for break_start, break_end in zip(table_breaks, table_breaks[1:]):
-            #split table if needed:
-            if len(blast_sorted) > break_start:
-                if count > 0:
-                    blast_banner = Banner(f'BLAST {basename} - Assembly Identification - continued')
-                print(r'\begin{table}[H]', file=tex)
-                print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-                print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-                print(r'\end{adjustbox}', file=tex)
-                print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-                print(r'\begin{tabular}{ l | p{1.3cm} | l }', file=tex)
-                print(f'nt base count & contigs & Description \\\\', file=tex)
-                print(r'\hline', file=tex)
-                # for each_row in self.summary_list[-1]:
-                #     flip_list.append(each_row)
-                for each_row in self.summary_list[::-1][break_start:(break_end - 1)]:
-                    description = f'{each_row[2]}'
-                    description = description.replace("_", "\_")[:108]
-                    print(f'{each_row[0]} & {each_row[1]} & {description} \\\\', file=tex)
-                print(r'\hline', file=tex)
-                # Close tabular before the adjustbox that wraps it (LIFO); drop stray \\.
-                print(r'\end{tabular}', file=tex)
-                print(r'\end{adjustbox}', file=tex)
-                print(r'\vspace{0.1 mm}', file=tex)
-                basename_slashed = basename.replace("_", "\_")
-                print(r'\begin{flushleft}Results provided by: \href{https://blast.ncbi.nlm.nih.gov/Blast.cgi}{BLAST ' + f'{basename_slashed}' + r' database}\end{flushleft}', file=tex)
-                print(r'\end{table}', file=tex)
-                count += 1
-
     def excel(self, excel_dict):
         basename = os.path.basename(self.blast_db)
         try:
@@ -461,7 +423,7 @@ class Spades_Stats:
         for each_dict in sorted(self.cov_length_list, key=itemgetter('length')):
             print(f'{each_dict["length"]:,}  {each_dict["cov"]:,}X  {each_dict["name"]}')
 
-    def write_stats(self, fq=None, build_latex=None, build_excel=None, message=None):
+    def write_stats(self, fq=None, build_excel=None, message=None):
 
         fastq_coverage_title = 'Mean Read Depth: read count * read size / total assembly length'
         spades_coverage_title = 'Largest k Value Mean Depth: SPAdes reporting'
@@ -478,11 +440,9 @@ class Spades_Stats:
 
         if fq: #calculating from FASTQ reads more accurate than spades reporting
             fastq_mean_coverage = ((fq.read1.total_read_count * fq.read1.length_mean) * 2) / self.total_contig_lengths
-            mean_coverage_latex_title = 'Mean Read Depth'
-            self.mean_coverage = fastq_mean_coverage  #default to read coverage on latex document
+            self.mean_coverage = fastq_mean_coverage  #default to read coverage in reports
             f'{fastq_coverage_title}: {bcolors.YELLOW}{fastq_mean_coverage:,.1f}X{bcolors.ENDC} \n'
         else:
-            mean_coverage_latex_title = 'Largest k Value Mean Depth'
             self.mean_coverage = self.spades_mean_coverage
 
         if build_excel is None: #just write out a default excel file.
@@ -542,25 +502,6 @@ class Spades_Stats:
             df.to_excel(f'{sample_name}_{st}_stats.xlsx')
             self.self_excel = f'{os.getcwd()}/{sample_name}_{st}_stats.xlsx'
 
-        if build_latex:
-            tex = build_latex
-            print(r'\begin{table}[H]', file=tex)
-            print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-            assembly_banner = Banner("Assembly Metrics")
-            print('\includegraphics[scale=1]{' + assembly_banner.banner + '}', file=tex)
-            print(r'\end{adjustbox}', file=tex)
-            print(r'\centering', file=tex)
-            print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-            print(r'\begin{tabular}{l|l|l|l|l|l}', file=tex)
-            print(r'Scaffolds & Total Length & Longest Scaffold & Scaffolds \textgreater 1K nt & N50 & ' + mean_coverage_latex_title +  r' \\', file=tex)
-            print(r'\hline', file=tex)
-            print(f'{self.contig_count:,} & {self.total_contig_lengths:,} & {int(self.longest_contig):,} & {self.greater_one_kb_count:,} & {self.n50:,} & {self.mean_coverage:,.1f}X \\\\', file=tex)
-            print(r'\hline', file=tex)
-            print(r'\end{tabular}', file=tex)
-            print(r'\end{adjustbox}', file=tex)
-            print(r'\begin{flushleft}Results provided by: \href{http://cab.spbu.ru/software/spades/}{SPAdes}\end{flushleft}', file=tex)
-            print(r'\end{table}', file=tex)
-
         if isinstance(build_excel, pd.DataFrame): #cannot use df as true value, must test with isinstance
             df = build_excel
             df.at[df.index[0], 'Assembly Contig Count'] = f'{self.contig_count:,}'
@@ -610,10 +551,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     #Main script
     blast = Blast_Fasta(FASTA=args.fasta, search=args.search, blast_out=args.blast_out, format=args.format, num_alignment=args.num_alignment, blast_db=args.blast_db)
 
-    #Latex report
-    latex_report = Latex_Report(blast.sample_name)
-    blast.latex(latex_report.tex)
-    latex_report.latex_ending()
 
     #Excel Stats
     excel_stats = Excel_Stats(blast.sample_name)

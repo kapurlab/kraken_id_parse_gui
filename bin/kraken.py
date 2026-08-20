@@ -13,7 +13,7 @@ import pandas as pd
 import multiprocessing
 multiprocessing.set_start_method('spawn', True)
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, apply_mpl_style
+from file_setup import Setup, bcolors, Excel_Stats, apply_mpl_style
 
 
 def _available_ram_bytes():
@@ -247,31 +247,6 @@ class Bracken_Pie_Charts:
         plot.yaxis.label.set_visible(False)
         plot.get_figure().savefig(f'{os.getcwd()}/bracken_pie.png', format='png', bbox_inches='tight')
         self.pie_chart = f'{os.getcwd()}/bracken_pie.png'
-
-    def latex(self, build_latex=False):
-            tex = build_latex
-            print(r'\begin{table}[H]', file=tex)
-            # adjustbox{width=...} takes horizontal-box content ONLY. A center
-            # environment in there is a trivlist opened in restricted horizontal
-            # mode, which LaTeX reports as "Something's wrong--perhaps a missing
-            # \item" — tectonic halts on it, so the legacy PDF was never
-            # produced (pdflatex's nonstopmode used to plow through it, which
-            # is why this survived unnoticed). The banner already fills the
-            # line via adjustbox; centering added nothing. Same pattern as the
-            # FASTQ-quality banner above, which always compiled.
-            print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-            if self.FASTA:
-                bracken_pie_banner = Banner("FASTA Identifications")
-            else:
-                bracken_pie_banner = Banner("FASTQ Identifications")
-            print(r'\includegraphics[scale=1]{' + bracken_pie_banner.banner + r'}', file=tex)
-            print(r'\end{adjustbox}', file=tex)
-            print(r'\begin{center}', file=tex)
-            print(r'\includegraphics[scale=0.8]{' + self.pie_chart + r'}', file=tex)
-            print(r'\end{center}', file=tex)
-            print(r'Identified using: \href{https://ccb.jhu.edu/software/kraken2/}{Kraken} and \href{https://ccb.jhu.edu/software/bracken/}{Bracken}', file=tex)
-            print(r'\end{table}', file=tex)
-
 
 if __name__ == "__main__": # execute if directly access by the interpreter
 

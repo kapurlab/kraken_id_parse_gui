@@ -13,7 +13,7 @@ import textwrap
 import numpy as np
 from Bio import SeqIO
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
+from file_setup import Setup, bcolors, Excel_Stats, safe_move
 
 from fastq_stats_seqkit import FASTQ_Stats
 
@@ -151,27 +151,6 @@ class Assemble(Setup):
             N50: {bcolors.PURPLE}{self.n50:,}{bcolors.ENDC}, \n \
             {self.coverage_title}: {bcolors.YELLOW}{self.mean_coverage:,.1f}X{bcolors.ENDC}\n')
     
-    def latex(self, build_latex):
-        tex = build_latex
-        blast_banner = Banner("Assembly")
-        print(r'\begin{table}[H]', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{tabular}{ l | l | l | l | l | l }', file=tex)
-        print(f'Contig count & Contig length counts $<$ | 301-999bp | $>$ & Longest contig & Total length & N50 & {self.coverage_title} \\\\', file=tex)
-        print(r'\hline', file=tex)
-        print(f'{self.contig_count:,} & {self.small_contigs_count:,} | {self.mid_size:,} | {self.greater_one_kb_count:,} & {self.longest_contig:,} & {self.total_contig_lengths:,} & {self.n50:,} & {self.mean_coverage:,.1f}X \\\\', file=tex)
-        print(r'\hline', file=tex)
-        # Close tabular before the adjustbox that wraps it (LIFO); the stray
-        # vertical-mode \\ is dropped. Wrong order aborted the PDF compile.
-        print(r'\end{tabular}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\vspace{0.1 mm}', file=tex)
-        # print(r'\begin{flushleft}Results provided by: \href{https://blast.ncbi.nlm.nih.gov/Blast.cgi}{BLAST}\end{flushleft}', file=tex)
-        print(r'\end{table}', file=tex)
-
     def excel(self, excel_dict):
         excel_dict['Contig count'] = f'{self.contig_count:,}'
         excel_dict['Contig length counts <|301-999bp|>'] = f'{self.small_contigs_count:,}|{self.mid_size:,}|{self.greater_one_kb_count:,}'
@@ -207,10 +186,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     else:
         print('### Error: Provide FASTQ or FASTA file.  See usda_assembly.py -h for option')
 
-    #Latex report
-    latex_report = Latex_Report(assemble.sample_name)
-    assemble.latex(latex_report.tex)
-    latex_report.latex_ending()
 
     #Excel Stats
     excel_stats = Excel_Stats(assemble.sample_name)

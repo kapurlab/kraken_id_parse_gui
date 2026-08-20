@@ -13,7 +13,7 @@ import zipfile
 import pandas as pd
 from Bio import SeqIO
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Excel_Stats
 from fastq_stats_seqkit import FASTQ_Stats
 # from vsnp3_vcf_annotation import VCF_Annotation
 from assembly import Assemble
@@ -102,25 +102,6 @@ class Zero_Coverage(Setup):
         self.genome_coverage = genome_coverage
         self.total_zero_coverage = total_zero_coverage
 
-    def latex(self, tex):
-        blast_banner = Banner(f'Coverage against {self.reference_name}')
-        print(r'\begin{table}[H]', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{tabular}{ l | l | l | l | l | l | l }', file=tex)
-        print(f'BAM File & Reference Length & Genome with Coverage & Average Depth & No Coverage Bases & Quality SNPs \\\\', file=tex)
-        print(r'\hline', file=tex)
-        bam = self.bam.replace('_', '\_')
-        print(f'{bam} & {self.reference_length:,} & {(self.genome_coverage*100):,.2f}\% & {self.ave_coverage:,.1f}X & {self.total_zero_coverage:,} & {self.good_snp_count:,} \\\\', file=tex)
-        print(r'\hline', file=tex)
-        # Close tabular before the adjustbox that wraps it (LIFO); drop stray \\.
-        print(r'\end{tabular}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\vspace{0.1 mm}', file=tex)
-        print(r'\end{table}', file=tex)
-    
     def excel(self, excel_dict):
         excel_dict['BAM File'] = f'{self.bam}'
         excel_dict['Reference'] = f'{self.reference_name}'
@@ -152,10 +133,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
     zero_coverage = Zero_Coverage(FASTA=args.FASTA, bam=args.bam, vcf=args.vcf, debug=args.debug)
 
-    #Latex report
-    latex_report = Latex_Report(zero_coverage.sample_name)
-    zero_coverage.latex(latex_report.tex)
-    latex_report.latex_ending()
 
     #Excel Stats
     excel_stats = Excel_Stats(zero_coverage.sample_name)

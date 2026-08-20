@@ -14,7 +14,7 @@ import allel
 from Bio import SeqIO
 from Bio.Seq import Seq
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats, safe_move
+from file_setup import Setup, bcolors, Excel_Stats, safe_move
 
 class bcolors:
     PURPLE = '\033[95m'
@@ -73,7 +73,16 @@ class Reference_Guided_Assembly():
         caution_df = df[(df.REF.str.len() > 1) | (
             df.ALT.astype(str).str.len() > 1)]
         if not caution_df.empty:
-            caution_df.to_excel('CAUTION_SITES.xlsx')
+            # xlsx sheets hold at most 1,048,576 rows. A low-coverage sample can
+            # produce millions of caution sites (most of the genome), and
+            # to_excel then raises ValueError and kills the whole consensus
+            # step. Ship the oversized list as CSV instead of dying.
+            if len(caution_df) >= 1_048_576:
+                caution_df.to_csv('CAUTION_SITES.csv.gz', compression='gzip')
+                print(f'NOTE: {len(caution_df):,} caution sites exceed the xlsx '
+                      'row limit — written to CAUTION_SITES.csv.gz instead.')
+            else:
+                caution_df.to_excel('CAUTION_SITES.xlsx')
         N_calls_df = df[(df.REF == 'N')]
         N_calls_df['ALT'] = 'N'
         print("")  # debug breakpoint line to check dataframes calls in debug console
@@ -123,19 +132,6 @@ class Reference_Guided_Assembly():
         self.ambiguous_snps_df = ambiguous_snps_df
         self.caution_df = caution_df
 
-    def latex(self, tex):
-        blast_banner = Banner(
-            "Sites Not Applied to Consensus -- Additional Verification Required")
-        print(r'\begin{table}[H]', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print('\includegraphics[scale=1]{' +
-              blast_banner.banner + '}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(self.caution_df.to_latex(), file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\end{table}', file=tex)
-
     def excel(self, excel_dict):
         if not self.caution_df.empty:
             excel_dict[
@@ -172,10 +168,6 @@ if __name__ == "__main__":  # execute if directly access by the interpreter
     reference_guided_assembly = Reference_Guided_Assembly(
         FASTA=args.FASTA, vcf=args.vcf, output_name=args.output_name, qual=args.qual, map_quality=args.map_quality, depth=args.depth, iupac=args.iupac)
 
-    # Latex report
-    latex_report = Latex_Report(reference_guided_assembly.output_name)
-    reference_guided_assembly.latex(latex_report.tex)
-    latex_report.latex_ending()
 
     # Excel Stats
     excel_stats = Excel_Stats(reference_guided_assembly.output_name)

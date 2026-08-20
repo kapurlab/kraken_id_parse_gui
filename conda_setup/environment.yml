@@ -25,7 +25,6 @@ dependencies:
   - krakentools
   - samtools
   - krona
-  - tectonic
   # Pipeline tools the bin/ scripts shell out to. These are NOT optional — the
   # GUI's assembly/alignment/QC steps invoke them directly (e.g. fastq_stats_seqkit
   # calls `seqkit`), so a fresh env without them fails at runtime.

@@ -21,7 +21,7 @@ from Bio import SeqIO
 import subprocess
 from pathlib import Path
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Excel_Stats
 
 
 class Coverage_Graph(Setup):
@@ -314,56 +314,6 @@ class Coverage_Graph(Setup):
                         os.remove(f)
                     except OSError:
                         pass
-
-    def latex(self, tex):
-        """Add coverage graph to LaTeX report"""
-        if not hasattr(self, 'output_pdf') or self.output_pdf is None:
-            print("Warning: Coverage graph not generated. Running analysis...")
-            self.get_coverage_graph()
-        
-        if not self.output_pdf:
-            print("Error: Could not generate coverage graph")
-            return
-
-        # Add banner and start figure environment
-        coverage_banner = Banner("Coverage Analysis")
-        print(r'\newpage', file=tex)
-
-        # Coverage banner
-        print(r'\begin{figure}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(f'\\includegraphics[scale=1]{{{coverage_banner.banner}}}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-
-        # Add coverage graph
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(f'\\includegraphics[width=\\textwidth]{{{self.output_pdf}}}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\caption{Coverage depth analysis showing read alignment depth across reference sequences.}', file=tex)
-        print(r'\end{figure}', file=tex)
-
-        print(r'\vspace{2cm}', file=tex)  # Add more vertical space between figure and table
-
-        # Add alignment statistics table
-        print(r'\begin{table}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{tabular}{l|r|r|r}', file=tex)
-        print(r'\hline', file=tex)
-        print(r'Reference & Length & Mean Coverage & \% Genome Covered \\', file=tex)
-        print(r'\hline', file=tex)
-
-        # Add reference statistics
-        for ref_id, stats in self.alignment_stats.items():
-            header = stats["header"].replace("_", "\\_").replace("&", "\\&")
-            print(f'{header} & {stats["length"]:,} & {stats["mean_coverage"]:.1f}X & {stats["percent_covered"]:.1f}\\% \\\\', file=tex)
-
-        print(r'\hline', file=tex)
-        print(r'\end{tabular}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\caption{Alignment statistics for each reference sequence.}', file=tex)
-        print(r'\end{table}', file=tex)
-
-        print(r'\clearpage', file=tex)  # Force a page break after each graph/table pair
 
 def main():
     import argparse

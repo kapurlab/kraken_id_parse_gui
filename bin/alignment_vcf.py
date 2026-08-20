@@ -15,7 +15,7 @@ from Bio import SeqIO
 
 from pathlib import Path
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Excel_Stats
 from fastq_stats_seqkit import FASTQ_Stats
 # from vsnp3_vcf_annotation import VCF_Annotation
 from assembly import Assemble
@@ -192,43 +192,6 @@ class Alignment(Setup):
             shutil.rmtree(temp_dir)
 
 
-    def latex(self, tex):
-        blast_banner = Banner(f'Read Mapping against {self.reference_name}')
-        print(r'\begin{table}[H]', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        
-        print(r'\begin{tabular}{ l | l | l | l | l | l }', file=tex)
-        print(r'Mapped Paired Reads & Mapped Single Reads & Unmapped Reads & Unmapped Percent & \multicolumn{2}{l}{Unmapped Assembled Contigs} \\', file=tex)
-        print(r'\hline', file=tex) 
-        mapped_reads = self.READ_PAIRS_EXAMINED + self.UNPAIRED_READS_EXAMINED
-        total_reads = mapped_reads + self.UNMAPPED_READS
-        self.freq_unmapped_reads = self.UNMAPPED_READS / total_reads
-        # if self.unmapped_assemble:
-        #     print(f'{self.READ_PAIRS_EXAMINED:,} & {self.UNPAIRED_READS_EXAMINED:,} & {self.UNMAPPED_READS:,} & {(self.freq_unmapped_reads*100):,.1f}' + r'\%' + f' & ' + r'\multicolumn{2}{l}{' + f'{self.assemble.contig_count:,}' + r' } \\', file=tex)
-        # else:
-        print(f'{self.READ_PAIRS_EXAMINED:,} & {self.UNPAIRED_READS_EXAMINED:,} & {self.UNMAPPED_READS:,} & {(self.freq_unmapped_reads*100):,.1f}' + r'\%' + f' & ' + r'\multicolumn{2}{l}{' + f'n/a' + r' } \\', file=tex)
-        print(r'\hline', file=tex)
-        print(r'\hline', file=tex)
-        
-        print(r'Duplicate Paired Reads & Duplicate Single Reads & \multicolumn{4}{l}{Duplicate Percent of Mapped Reads} \\', file=tex)
-        print(r'\hline', file=tex)
-        print(f'{self.READ_PAIR_DUPLICATES:,} & {self.UNPAIRED_READ_DUPLICATES:,} & ' + r'\multicolumn{4}{l}{' + f'{(self.PERCENT_DUPLICATION*100):,.1f}' + r'\%} \\', file=tex)
-        print(r'\hline', file=tex)
-        print(r'\hline', file=tex)
-
-        print(f'BAM File & Reference Length & Genome with Coverage & Average Depth & No Coverage Bases & Quality SNPs \\\\', file=tex)
-        print(r'\hline', file=tex)
-        bam = self.zero_coverage.bam.replace('_', '\_')
-        print(f'{bam} & {self.zero_coverage.reference_length:,} & {(self.zero_coverage.genome_coverage*100):,.2f}\% & {self.zero_coverage.ave_coverage:,.1f}X & {self.zero_coverage.total_zero_coverage:,} & {self.zero_coverage.good_snp_count:,} \\\\', file=tex)
-        print(r'\hline', file=tex)
-        print(r'\end{tabular}', file=tex)
-
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\end{table}', file=tex)
-    
     def excel(self, excel_dict):
         excel_dict['Mapped Paired Reads'] = f'{self.READ_PAIRS_EXAMINED:,}'
         excel_dict['Mapped Single Reads'] = f'{self.UNPAIRED_READS_EXAMINED:,}'
@@ -276,10 +239,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     alignment = Alignment(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, reference=args.FASTA, gbk=args.gbk, skip_assembly=args.skip_assembly, debug=args.debug)
     alignment.run()
 
-    #Latex report
-    latex_report = Latex_Report(alignment.sample_name)
-    alignment.latex(latex_report.tex)
-    latex_report.latex_ending()
 
     #Excel Stats
     excel_stats = Excel_Stats(alignment.sample_name)

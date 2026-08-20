@@ -65,7 +65,7 @@ from random import randint
 from time import sleep
 from Bio import SeqIO
 
-from file_setup import bcolors, Latex_Report, Excel_Stats, safe_move
+from file_setup import bcolors, Excel_Stats, safe_move
 
 from fastq_stats_seqkit import FASTQ_Stats
 from alignment_vcf import Alignment
@@ -98,7 +98,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
     parser.add_argument('-r1', '--read1', action='store', dest='FASTQ_R1', required=False, help='Required: single read, R1 when Illumina read')
     parser.add_argument('-r2', '--read2', action='store', dest='FASTQ_R2', required=False, default=None, help='Optional: R2 Illumina read')
-    parser.add_argument('-l', '--logo', action='store', dest='logo', required=False, help='Logo for the Latex PDF report')
     parser.add_argument("-t", "--taxon", action='store', dest='taxon', help='Target Taxon')
     parser.add_argument("-k", "--kraken_db", action='store', dest='kraken_db', help='Specify Kraken db to use')
     parser.add_argument("-b", "--blast_db", action='store', dest='blast_db', default="nt", help='Specify BLAST db to use')
@@ -106,6 +105,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     parser.add_argument('-d', '--debug', action='store_true', dest='debug', default=False, help='keep temp file')
     parser.add_argument('--kraken-only', action='store_true', dest='kraken_only', default=False, help='Run only Kraken2 and produce the Krona graph; skip read parsing, assembly, and BLAST. Requires -k.')
     parser.add_argument('--no-blast', action='store_true', dest='no_blast', default=False, help='Run Kraken2 and taxonomic read parsing, then stop: skip assembly, BLAST, and coverage. Leaves the parsed FASTQ.gz reads for the target taxon. Requires -k and -t.')
+    parser.add_argument('--no-pdf', action='store_true', dest='no_pdf', default=False, help='Skip the PDF rendering of the report. report.html (and run_manifest.json) are always written; the PDF is just WeasyPrint\'s print rendering of that HTML and is not always needed.')
     parser.add_argument('-v', '--version', action='version', version=f'{os.path.basename(__file__)}: version {__version__}')
     args = parser.parse_args()
     
@@ -114,7 +114,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         'kraken2', 'bracken', 'kreport2krona.py', 'ktImportText',
         'spades.py', 'blastn', 'bwa', 'samtools', 'picard',
         'freebayes', 'freebayes-parallel', 'vcffilter', 'pigz', 'seqkit',
-        'tectonic',
     ]
     print(f'\n{"="*55}')
     print(f'  PRE-FLIGHT TOOL CHECK')
@@ -141,14 +140,14 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     # id_parse = ID_Parse(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2,)
     sample_name = re.sub('[._].*', '', os.path.basename(args.FASTQ_R1))
 
-    #Latex report
-    latex_report = Latex_Report(sample_name=sample_name, logo=args.logo)
+    # Reporting is HTML-first: run_manifest.json + report.html, with report.pdf
+    # as WeasyPrint's print rendering of that HTML (skippable via --no-pdf).
+    # The old LaTeX/tectonic report is gone entirely.
     #Excel Stats
     excel_stats = Excel_Stats(sample_name)
 
     fastq_stats = FASTQ_Stats(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, debug=True)
     fastq_stats.run()
-    fastq_stats.latex(latex_report.tex)
     fastq_stats.excel(excel_stats.excel_dict)
 
     if args.kraken_only and not args.kraken_db:
@@ -185,7 +184,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             if kraken.bracken_excel:
                 bracken_pie_charts = Bracken_Pie_Charts()
                 bracken_pie_charts.run(kraken.bracken_excel)
-                bracken_pie_charts.latex(build_latex=latex_report.tex)
         else:
             print(f"{bcolors.YELLOW}WARNING: bracken not found on PATH — skipping "
                   f"Bracken abundance re-estimation and its pie charts "
@@ -264,17 +262,24 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             )
             manifest_path = write_manifest(manifest, output_dir)
             html_path = render_html_report(manifest, output_dir)
-            pdf_path, pdf_warning = render_pdf_report(html_path, output_dir)
-            if pdf_warning:
-                manifest.setdefault("warnings", []).append(pdf_warning)
-                manifest_path = write_manifest(manifest, output_dir)
-                html_path = render_html_report(manifest, output_dir)
-                print(f"WARNING: {pdf_warning}")
+            # The PDF is nothing more than WeasyPrint's print rendering of
+            # report.html — skippable because it is not always wanted.
+            if args.no_pdf:
+                print("--no-pdf: skipping the PDF rendering of report.html.")
             else:
+                pdf_path, pdf_warning = render_pdf_report(html_path, output_dir)
+                if pdf_warning:
+                    manifest.setdefault("warnings", []).append(pdf_warning)
+                    print(f"WARNING: {pdf_warning}")
+                else:
+                    print(f"PDF report generated: {pdf_path}")
+                # Re-scan so the manifest's artifact list includes (or the
+                # warning mentions) the PDF outcome, then re-render the HTML
+                # from that final manifest.
                 manifest = build_run_manifest(
                     sample_id=sample_name,
                     status=status,
-                    warnings=warnings,
+                    warnings=manifest.get("warnings", warnings),
                     inputs={"r1": args.FASTQ_R1, "r2": args.FASTQ_R2},
                     parameters={
                         "taxon": args.taxon,
@@ -286,7 +291,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                 )
                 manifest_path = write_manifest(manifest, output_dir)
                 html_path = render_html_report(manifest, output_dir)
-                print(f"PDF report generated: {pdf_path}")
             print(f"Structured report manifest generated: {manifest_path}")
             print(f"HTML report generated: {html_path}")
         except Exception as exc:
@@ -308,11 +312,9 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     )
     try:
         parser.run()
-        parser.latex(latex_report.tex)
         parser.excel(excel_stats.excel_dict)
     except TaxonNotFoundError:
-        print(f'\\textcolor{{red}}{{\\textbf{{\\Large Target {args.taxon} taxon not found by Kraken}}}}\\\\[1em]\n\nScript terminated', file=latex_report.tex)
-        latex_report.latex_ending()
+        print(f"{bcolors.RED}Target taxon '{args.taxon}' not found by Kraken — script terminated.{bcolors.ENDC}")
         excel_stats.excel_dict['Target Taxon'] = args.taxon
         excel_stats.excel_dict['Extracted Reads'] = "No Reads Found"
         excel_stats.post_excel()
@@ -331,7 +333,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         print(f"\n{bcolors.GREEN}--no-blast mode: extracted target reads "
               f"({parser.r1_out}.gz, {parser.r2_out}.gz).{bcolors.ENDC}")
         print(f"{bcolors.GREEN}Skipping assembly, BLAST, and coverage analysis.{bcolors.ENDC}")
-        latex_report.latex_ending()
         excel_stats.post_excel()
         cleanup_artifacts()
         write_structured_reports("completed")
@@ -348,9 +349,8 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     try:
         assembler.run()
     except SPAdesDidNotAssembleFASTA:
-        print('Assembly failed, Check reads')
-        print(f'\\textcolor{{red}}{{\\textbf{{\\Large Assembly failed, Check reads - Likely not enough {args.taxon} reads to complete assembly}}}}\\\\[1em]\n\nScript terminated', file=latex_report.tex)
-        latex_report.latex_ending()
+        print(f"{bcolors.RED}Assembly failed, check reads — likely not enough "
+              f"{args.taxon} reads to complete assembly. Script terminated.{bcolors.ENDC}")
         excel_stats.excel_dict['Contig count'] = "Assembly did not complete"
         excel_stats.post_excel()
         cleanup_artifacts()
@@ -384,9 +384,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     assembler.FASTA = new_FASTA
     print(f"Updated FASTA variable: {assembler.FASTA}")
 
-    # latex_report = Latex_Report(assembler.sample_name)
-    assembler.latex(latex_report.tex)
-    blast.latex(latex_report.tex)
     if args.taxon == 'Apicomplexa':
         args.specific = args.taxon
         apicomplexa = Apicomplexa()
@@ -400,7 +397,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             apicomplexa.run(alignment_stats=isav_dict)
             coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug)
             coverage_graph.get_coverage_graph()
-            coverage_graph.latex(latex_report.tex)
             source = open('concatenated_specific.fasta', 'r')
             dest.write(source.read())
             source.close()
@@ -420,7 +416,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             isav_specific.run(alignment_stats=isav_dict)
             coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug)
             coverage_graph.get_coverage_graph()
-            coverage_graph.latex(latex_report.tex)
             source = open('concatenated_specific.fasta', 'r')
             dest.write(source.read())
             source.close()
@@ -443,7 +438,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             orbivirus_specific.run(alignment_stats=btv_dict)
             coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug)
             coverage_graph.get_coverage_graph()
-            coverage_graph.latex(latex_report.tex)
             source = open('concatenated_specific.fasta', 'r')
             dest.write(source.read())
             source.close()
@@ -453,7 +447,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             orbivirus_specific.run(alignment_stats=ehv_dict)
             coverage_graph = Coverage_Graph(FASTA="concatenated_specific.fasta", FASTQ_R1=parser.FASTQ_R1, FASTQ_R2=parser.FASTQ_R2, debug=args.debug)
             coverage_graph.get_coverage_graph()
-            coverage_graph.latex(latex_report.tex)
             source = open('concatenated_specific.fasta', 'r')
             dest.write(source.read())
             source.close()
@@ -537,7 +530,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         args.specific = args.taxon
         
     print(f"\n{bcolors.BLUE}Generating analysis reports...{bcolors.ENDC}")
-    # latex_report.latex_ending()
 
     # excel_stats = Excel_Stats(assembler.sample_name)
     assembler.excel(excel_stats.excel_dict)
@@ -689,11 +681,9 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         coverage_graph = Coverage_Graph(FASTA="output.fasta", FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2)
         coverage_graph.get_coverage_graph()
         os.remove("output.fasta")
-        coverage_graph.latex(latex_report.tex)
 
 ####################################################################################################################
 
-    latex_report.latex_ending()
     excel_stats.post_excel()
     
     current_directory = os.getcwd()

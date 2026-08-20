@@ -251,14 +251,20 @@ class Bracken_Pie_Charts:
     def latex(self, build_latex=False):
             tex = build_latex
             print(r'\begin{table}[H]', file=tex)
+            # adjustbox{width=...} takes horizontal-box content ONLY. A center
+            # environment in there is a trivlist opened in restricted horizontal
+            # mode, which LaTeX reports as "Something's wrong--perhaps a missing
+            # \item" — tectonic halts on it, so the legacy PDF was never
+            # produced (pdflatex's nonstopmode used to plow through it, which
+            # is why this survived unnoticed). The banner already fills the
+            # line via adjustbox; centering added nothing. Same pattern as the
+            # FASTQ-quality banner above, which always compiled.
             print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
             if self.FASTA:
                 bracken_pie_banner = Banner("FASTA Identifications")
             else:
                 bracken_pie_banner = Banner("FASTQ Identifications")
-            print(r'\begin{center}', file=tex)
             print(r'\includegraphics[scale=1]{' + bracken_pie_banner.banner + r'}', file=tex)
-            print(r'\end{center}', file=tex)
             print(r'\end{adjustbox}', file=tex)
             print(r'\begin{center}', file=tex)
             print(r'\includegraphics[scale=0.8]{' + self.pie_chart + r'}', file=tex)

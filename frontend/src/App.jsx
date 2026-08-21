@@ -39,7 +39,16 @@ export default function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   // Sample-loading state, keyed by project name so multiple expanded projects
   // don't clobber each other.
-  const [activeProject, setActiveProject] = useState(""); // project the Inputs pane targets
+  /* The selected project survives a reload. The Results table is scoped to
+     this value, so before it was persisted every page load silently reset it
+     to the first project — and a run that finished in any other project
+     "disappeared", with the empty table reading as lost data. localStorage is
+     guarded: it can throw (private windows, storage quotas), and losing the
+     nicety must never take the app down. */
+  const [activeProject, setActiveProject] = useState(() => {
+    try { return window.localStorage.getItem("kraken_id_parse_gui.activeProject") || ""; }
+    catch { return ""; }
+  }); // project the Inputs pane targets
   /* Every completed sample for the active project. Refreshed when a run
      finishes rather than polled, matching the rest of the suite. */
   const results = useResults(activeProject);
@@ -303,6 +312,10 @@ export default function App() {
   // means the import/upload/download controls are always available as long as
   // at least one project exists — no need to hunt for "the active project".
   useEffect(() => {
+    // Wait for the fetch: on mount `projects` is [] because the list hasn't
+    // ARRIVED, not because none exist, and clearing here wiped the selection
+    // restored from localStorage before it could ever be used.
+    if (projectsLoading) return;
     if (!projects.length) {
       if (activeProject) setActiveProject("");
       return;
@@ -311,8 +324,19 @@ export default function App() {
       const first = projects[0].name;
       setActiveProject(first);
       if (inputsByProj[first] === undefined) loadInputs(first);
+    } else if (inputsByProj[activeProject] === undefined) {
+      // Restored from localStorage: the Inputs pane needs its file list too,
+      // which selectProject would normally have loaded.
+      loadInputs(activeProject);
     }
-  }, [projects]);
+  }, [projects, projectsLoading]);
+
+  // Remember the selection for the next visit (see the state initializer).
+  useEffect(() => {
+    if (!activeProject) return;
+    try { window.localStorage.setItem("kraken_id_parse_gui.activeProject", activeProject); }
+    catch { /* storage unavailable — the default-to-first behavior still works */ }
+  }, [activeProject]);
 
   function fetchSamples(name) {
     return fetch(`./api/projects/${encodeURIComponent(name)}/samples`)
@@ -1533,6 +1557,32 @@ export default function App() {
                 results={results}
                 columns={resultColumns}
                 labels={{ entity: "sample", sampleHeader: "Sample" }}
+                emptyHint={(() => {
+                  /* The table is scoped to ONE project, and that scoping has
+                     misread as data loss: a reload used to reset the selection,
+                     and a just-finished run in another project "vanished". The
+                     projects list already knows who has runs — say so, and make
+                     each one a single click. */
+                  const others = projects.filter(
+                    (p) => p.name !== activeProject && (p.kraken_runs || []).length
+                  );
+                  if (!others.length) return null;
+                  return (
+                    <div className="rp-empty-hint">
+                      Completed runs exist in:{" "}
+                      {others.map((p) => (
+                        <button
+                          key={p.name}
+                          className="ghost"
+                          onClick={() => selectProject(p.name)}
+                          title={`Show ${p.name}'s Kraken results`}
+                        >
+                          {p.name} ({p.kraken_runs.length})
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
               />
             </div>
           </div>

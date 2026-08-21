@@ -43,7 +43,15 @@ dependencies:
   - scikit-allel
   - openpyxl
   - h5py
-  - dask
+  # Floored, not open: scikit-allel's import runs through dask, and dask
+  # 2023.x decorates with np.round_ — removed in NumPy 2.0. With both numpy
+  # and dask unpinned, a fresh solve produced numpy 2.2 + dask 2023.3 and
+  # `import allel` died three packages deep (macOS, 2026-08-21; the pairing
+  # is platform-neutral). Any dask from 2024.8 on imports cleanly under
+  # numpy 2. The suite manifest (bioinformatic_diagnostic_tools/tools.yml)
+  # carries the same floor under `constraints:` for envs built before this
+  # spec changed.
+  - dask >=2024.8
   - humanize          # fastq_stats_seqkit.py imports this at module load
   - pysam             # coverage_graph.py (unguarded import)
   - weasyprint        # HTML->PDF for the report (no browser needed; the

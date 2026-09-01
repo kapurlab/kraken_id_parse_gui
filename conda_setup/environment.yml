@@ -4,7 +4,6 @@ name: kraken_id_parse
 channels:
   - conda-forge
   - bioconda
-  - defaults
 
 dependencies:
   # Core Python and scientific packages

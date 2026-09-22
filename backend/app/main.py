@@ -111,21 +111,34 @@ def _read_taxa() -> List[str]:
     return taxa
 
 
-def _write_taxa(taxa: List[str]) -> None:
-    """Rewrite config/taxa.yaml as a flat YAML sequence, preserving the header."""
+def _taxa_yaml_line(name: str) -> str:
+    """One taxon as a YAML sequence entry, quoted when the name needs it."""
+    name = name.strip()
+    if not name:
+        return ""
+    if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
+        esc = name.replace("\\", "\\\\").replace('"', '\\"')
+        return f'- "{esc}"'
+    return f"- {name}"
+
+
+def _append_taxon(name: str) -> None:
+    """Add one taxon to the shared taxa.yaml, leaving the rest of the file alone.
+
+    This used to rewrite the file from the names the parser understood, which
+    deleted every comment in it — and the header above says entries may be
+    added "by hand", so the notes people keep beside one are real, and both
+    GUIs write this same file. An append keeps them: the existing bytes are
+    untouched and one line goes on the end.
+    """
     _TAXA_YAML.parent.mkdir(parents=True, exist_ok=True)
-    lines = [_TAXA_HEADER]
-    for name in taxa:
-        name = name.strip()
-        if not name:
-            continue
-        # Quote entries containing YAML-significant leading chars to stay valid.
-        if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
-            esc = name.replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'- "{esc}"')
-        else:
-            lines.append(f"- {name}")
-    _TAXA_YAML.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        text = _TAXA_YAML.read_text(encoding="utf-8")
+    except OSError:
+        text = _TAXA_HEADER
+    if text and not text.endswith("\n"):
+        text += "\n"
+    _TAXA_YAML.write_text(text + _taxa_yaml_line(name) + "\n", encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # Version
@@ -896,7 +909,7 @@ def api_add_taxon(payload: TaxonPayload):
         return JSONResponse({"taxa": taxa, "added": False})
     taxa.append(name)
     try:
-        _write_taxa(taxa)
+        _append_taxon(name)
     except OSError as exc:
         raise HTTPException(500, f"Could not save taxon list: {exc}")
     return JSONResponse({"taxa": taxa, "added": True})

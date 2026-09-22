@@ -1,0 +1,18 @@
+# The conda env the launcher builds beside the checkout. 3.6 GB of it, and a
+# single `git add -A` in here would stage the lot — this repo was the only one
+# of the nine suite tools without a root .gitignore to stop that.
+env/
+.venv/
+
+# Bytecode caches. Python rewrites these on import, so a committed set goes
+# stale the moment anyone RUNS the tool: every checkout then shows a page of
+# modified .pyc it never touched, and `bdtools update` refused to move the
+# checkout at all ("has local source changes: .../__init__.cpython-310.pyc")
+# until the suite was taught to tolerate them in 2026-09. vsnp_gui hit this at
+# v0.4.73 and irma_gui on 2026-09-15; nothing is committed here, and this is
+# what keeps it that way.
+__pycache__/
+*.pyc
+
+# node_modules and .vite/ are covered by frontend/.gitignore, backend/jobs/ by
+# backend/.gitignore.

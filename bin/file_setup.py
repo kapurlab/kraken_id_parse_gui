@@ -6,6 +6,7 @@ Provides base classes for file handling, reporting, and formatting.
 """
 
 import os
+import sys
 import shutil
 import re
 from typing import Optional, Dict, List, Union, Tuple
@@ -15,26 +16,140 @@ from datetime import datetime
 from pathlib import Path
 
 try:
-    import svgwrite
-    from cairosvg import svg2png
     from PIL import Image
     import numpy as np
     import colorsys
-    HAS_SVG_SUPPORT = True
 except ImportError:
-    HAS_SVG_SUPPORT = False
+    pass
+
+def resolve_cpus(explicit: Optional[Union[int, str]] = None) -> int:
+    """Resolve the worker thread count for the CPU-heavy steps (kraken2, BLAST,
+    SPAdes, bwa).
+
+    Priority: explicit value > ``KIP_THREADS`` env var > ``SLURM_CPUS_PER_TASK``
+    > CPU affinity (cgroup-aware, Linux) > ``multiprocessing.cpu_count()``.
+
+    An explicit allocation (``--threads N`` / ``--override threads=N``, or
+    ``sbatch --cpus-per-task``) is honored EXACTLY so many samples can be
+    packed onto one node. The auto-detect path (a direct/Mac run with nothing
+    set) keeps the historical behavior of leaving 2 cores free so an interactive
+    machine stays responsive.
+    """
+    # Explicit request (--threads / KIP_THREADS) wins and is honored exactly,
+    # even if 1.
+    for val in (explicit, os.environ.get('KIP_THREADS')):
+        try:
+            n = int(val)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    # SLURM_CPUS_PER_TASK is honored only when it reflects a real per-task
+    # allocation (>1). Some clusters export "1" alongside a whole-node --ntasks
+    # request; treating that as authoritative would silently single-thread the
+    # existing production SLURM runs, so we ignore it and fall through to affinity.
+    try:
+        n = int(os.environ.get('SLURM_CPUS_PER_TASK'))
+        if n > 1:
+            return n
+    except (TypeError, ValueError):
+        pass
+    try:
+        avail = len(os.sched_getaffinity(0))  # honors cgroup/Slurm binding
+    except AttributeError:
+        avail = multiprocessing.cpu_count()   # macOS has no sched_getaffinity
+    return max(1, avail - 2)
+
+
+def color_enabled(stream=None) -> bool:
+    """
+    Decide whether to emit ANSI colors. True only for an interactive terminal.
+    When stdout is redirected to a file (e.g. a SLURM .out log) colors are OFF so
+    the log stays clean instead of full of raw escape codes. Honors the
+    conventional NO_COLOR (force off) and FORCE_COLOR (force on) env vars.
+    """
+    if os.environ.get('NO_COLOR') is not None:
+        return False
+    if os.environ.get('FORCE_COLOR') is not None:
+        return True
+    stream = stream if stream is not None else sys.stdout
+    try:
+        return stream.isatty() and os.environ.get('TERM', '') != 'dumb'
+    except Exception:
+        return False
+
 
 class bcolors:
-    """ANSI color codes for terminal output formatting"""
-    PURPLE = '\033[95m'
-    BLUE = '\033[94m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    WHITE = '\033[37m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-    ENDC = '\033[0m'
+    """ANSI color codes, blanked automatically when output is not a terminal
+    (so SLURM/redirected logs are not littered with escape sequences)."""
+    _enabled = color_enabled()
+    if _enabled:
+        PURPLE = '\033[95m'
+        BLUE = '\033[94m'
+        GREEN = '\033[92m'
+        YELLOW = '\033[93m'
+        RED = '\033[91m'
+        WHITE = '\033[37m'
+        BOLD = '\033[1m'
+        UNDERLINE = '\033[4m'
+        ENDC = '\033[0m'
+    else:
+        PURPLE = BLUE = GREEN = YELLOW = RED = WHITE = BOLD = UNDERLINE = ENDC = ''
+
+
+class UI:
+    """
+    TTY-aware console formatting for pipeline status lines.
+
+    On an interactive terminal these render with color, bold, and box-drawing
+    rules; when redirected to a file (SLURM logs) they degrade to clean ASCII
+    with no escape codes, so both surfaces look intentional. Each helper returns
+    a single line, which keeps them tidy even when passed through the logger
+    (whose 'timestamp - INFO -' prefix would break a multi-line box).
+    """
+    color = bcolors._enabled
+
+    @staticmethod
+    def banner(msg: str) -> str:
+        if UI.color:
+            return f"\n{bcolors.BOLD}{bcolors.GREEN}{'═' * 60}{bcolors.ENDC}\n" \
+                   f"{bcolors.BOLD}{bcolors.GREEN}  {msg}{bcolors.ENDC}\n" \
+                   f"{bcolors.BOLD}{bcolors.GREEN}{'═' * 60}{bcolors.ENDC}"
+        bar = '=' * 60
+        return f"\n{bar}\n  {msg}\n{bar}"
+
+    @staticmethod
+    def step(n, total, msg: str) -> str:
+        if UI.color:
+            return f"{bcolors.BOLD}{bcolors.BLUE}━━▶ Step {n}/{total} · {msg}{bcolors.ENDC}"
+        return f"==> Step {n}/{total}: {msg}"
+
+    @staticmethod
+    def ok(msg: str) -> str:
+        return f"{bcolors.GREEN}✓{bcolors.ENDC} {msg}" if UI.color else f"[OK] {msg}"
+
+    @staticmethod
+    def warn(msg: str) -> str:
+        return f"{bcolors.YELLOW}⚠ {msg}{bcolors.ENDC}" if UI.color else f"[WARN] {msg}"
+
+    @staticmethod
+    def error(msg: str) -> str:
+        return f"{bcolors.RED}✗ {msg}{bcolors.ENDC}" if UI.color else f"[ERROR] {msg}"
+
+
+def move_overwrite(src: str, dst_dir: str) -> str:
+    """
+    Move ``src`` into ``dst_dir``, replacing any existing entry of the same name.
+
+    Re-run safe: plain ``shutil.move`` raises "Destination path ... already exists"
+    when the pipeline is run a second time in the same folder. Returns the final path.
+    """
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = os.path.join(dst_dir, os.path.basename(src.rstrip('/')))
+    if os.path.exists(dst):
+        shutil.rmtree(dst) if os.path.isdir(dst) else os.remove(dst)
+    shutil.move(src, dst)
+    return dst
 
 class Setup:
     def __init__(self, 
@@ -77,7 +192,7 @@ class Setup:
         
         # Set up additional attributes
         self.startTime = datetime.now()
-        self.cpus = max(1, multiprocessing.cpu_count() - 2)
+        self.cpus = resolve_cpus()
         self.date_stamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         
         if self.debug:
@@ -216,221 +331,6 @@ def analyze_logo_color(logo_path: str) -> str:
         print(f"Error analyzing logo color: {e}")
         return default_color
 
-class Banner:
-    """Generate banner images for reports with modern design elements"""
-
-    def __init__(self, title: str, hexcode: str = "56, 68, 117"):
-        """
-        Create a professional banner image with specified title and color.
-        
-        Args:
-            title: Text to display on banner
-            hexcode: RGB color code for banner background
-        
-        Raises:
-            ImportError: If svgwrite or cairosvg are not available
-        """
-        if not HAS_SVG_SUPPORT:
-            raise ImportError("svgwrite, cairosvg, and PIL are required for banner generation")
-            
-        width = 2600
-        height = 90
-        
-        # Parse the RGB values for gradient creation
-        r, g, b = map(int, hexcode.split(','))
-        # Create slightly lighter shade for gradient
-        light_r = min(r + 20, 255)
-        light_g = min(g + 20, 255)
-        light_b = min(b + 20, 255)
-        
-        # Create SVG
-        svgimg = svgwrite.Drawing(size=(width, height))
-        
-        # Create a basic rounded rectangle with gradient fill
-        gradient = svgimg.linearGradient(
-            start=(0, 0), end=(0, height), 
-            id="banner_gradient",
-            gradientUnits="userSpaceOnUse"
-        )
-        gradient.add_stop_color(offset='0%', color=f'rgb({light_r}, {light_g}, {light_b})')
-        gradient.add_stop_color(offset='100%', color=f'rgb({r}, {g}, {b})')
-        svgimg.defs.add(gradient)
-        
-        # Create a basic rounded rectangle
-        svgimg.add(svgimg.rect([0, 0], [width, height], 
-                              rx=10, ry=10,  # Rounded corners
-                              fill="url(#banner_gradient)", 
-                              stroke="none"))
-        
-        # Add a thin highlight line at the top for a polished look
-        svgimg.add(svgimg.rect([2, 2], [width-4, 3], 
-                              rx=8, ry=3,
-                              fill="white",
-                              stroke="none",
-                              opacity=0.3))
-        
-        # Add a subtle shadow at the bottom
-        svgimg.add(svgimg.rect([2, height-5], [width-4, 3], 
-                              rx=0, ry=0,
-                              fill="black",
-                              stroke="none",
-                              opacity=0.2))
-        
-        # Add title text
-        svgimg.add(svgimg.text(title, 
-                              insert=(30, 60), 
-                              fill='white',
-                              font_size='50px',
-                              font_weight='bold'))
-        
-        # Save and convert
-        temp_svg = f'temp_{title.replace(" ", "_")}.svg'
-        svgimg.saveas(temp_svg)
-        
-        with open(temp_svg, 'r') as content_file:
-            content = content_file.read()
-            
-        output_name = f'{title.replace(" ", "_")}-banner.png'
-        svg2png(bytestring=content, write_to=output_name)
-        
-        # Cleanup
-        os.remove(temp_svg)
-        self.banner = str(Path(os.getcwd()) / output_name)
-        
-class Latex_Report:
-    """Generate LaTeX reports with consistent formatting"""
-
-    def __init__(self, sample_name: str, report_description: Optional[str] = None, logo: Optional[str] = None):
-        """
-        Initialize LaTeX report with standard formatting.
-        
-        Args:
-            sample_name: Name of the sample for the report
-            report_description: Optional description to include in header
-            logo: Optional path to logo file
-        """
-        date_stamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        self.tex_file = f'{sample_name}_{date_stamp}_report.tex'
-        self.logo = logo
-        
-        # Extract color from logo if provided, otherwise use default
-        self.banner_color = analyze_logo_color(logo) if logo else "56, 68, 117"
-        
-        self.tex = open(self.tex_file, 'w')
-        self._write_preamble()
-        self._write_header(sample_name, report_description, logo)
-        
-    def _write_preamble(self) -> None:
-        """Write LaTeX preamble with package imports and styling"""
-        preamble = [
-            r'\documentclass{article}',
-            r'\usepackage[margin=1in]{geometry}',
-            r'\usepackage{adjustbox}',
-            r'\usepackage{float}',
-            r'\usepackage{graphicx}',
-            r'\usepackage{fancyhdr}',
-            r'\usepackage{hyperref}',
-            r'\usepackage{longtable}',
-            r'\usepackage[scaled]{helvet}',
-            r'\renewcommand\familydefault{\sfdefault}',
-            r'\usepackage[T1]{fontenc}',
-            r'\usepackage{xcolor}'
-        ]
-        print('\n'.join(preamble), file=self.tex)
-        
-    def _write_header(self, sample_name: str, report_description: Optional[str], logo: Optional[str]):
-        """Write report header with logo and title"""
-        current_date = datetime.now().strftime('%B %d, %Y')
-        
-        # Setup the page style without logo for all pages
-        header = [
-            r'\pagestyle{fancy}',
-            r'\fancyhf{}', # Clear all header/footer fields
-            r'\rhead{\textbf{\large ' + current_date + r'}}',
-            r'\renewcommand{\headrulewidth}{0.4pt}',
-            r'\begin{document}'
-        ]
-        
-        # Add title page content with logo
-        if logo:
-            header.extend([
-                r'\thispagestyle{empty}', # No headers on first page
-                r'\vspace*{-0.5cm}', # Move up to minimize space at top
-                r'\noindent\begin{minipage}[t]{0.5\textwidth}',
-                r'\includegraphics[width=1.0\textwidth,keepaspectratio]{' + f'{logo}' + r'}',
-                r'\end{minipage}',
-                r'\begin{minipage}[t]{0.5\textwidth}',
-                r'\begin{flushright}',
-                r'\textbf{\large ' + current_date + r'}',
-                r'\end{flushright}',
-                r'\end{minipage}',
-                r'\vspace{0.2cm}',
-                r'\hrule', # Add horizontal line
-                r'\vspace{0.2cm}'
-            ])
-        else:
-            header.extend([
-                r'\thispagestyle{empty}',
-                r'\vspace*{-0.5cm}',
-                r'\begin{flushright}',
-                r'\textbf{\large ' + current_date + r'}',
-                r'\end{flushright}',
-                r'\vspace{0.2cm}',
-                r'\hrule',
-                r'\vspace{0.2cm}'
-            ])
-        
-        # Add sample name
-        header.append(r'\noindent\textbf{\large{\fontfamily{\sfdefault}\selectfont Sample: ' + sample_name + r'}}')
-        
-        # Add report description if provided
-        if report_description:
-            header.append(r'\vspace{0.2cm}')
-            header.append(r'\noindent\textbf{\large{' + report_description + r'}}')
-        
-        # Add some space before content starts
-        header.append(r'\vspace{0.2cm}')
-        
-        print('\n'.join(header), file=self.tex)
-
-    def add_section(self, title: str) -> None:
-        """Add a new section with a banner to the report
-        
-        Args:
-            title: Section title
-        """
-        # Create banner with title and matching color from logo analysis
-        banner = Banner(title, hexcode=self.banner_color)
-        
-        # Add the banner to the LaTeX document
-        print(r'\begin{figure}[H]', file=self.tex)
-        print(r'\centering', file=self.tex)
-        print(r'\includegraphics[width=\textwidth]{' + banner.banner + '}', file=self.tex)
-        print(r'\end{figure}', file=self.tex)
-
-    def add_table_section(self, title: str) -> None:
-        """Add a section with a smaller banner suitable for tables
-        
-        Args:
-            title: Section title
-        """
-        # Create banner with title and matching color from logo analysis
-        banner = Banner(title, hexcode=self.banner_color)
-        
-        # Add the banner to the LaTeX document, but with smaller size to fit tables
-        print(r'\begin{center}', file=self.tex)
-        print(r'\includegraphics[width=\textwidth]{' + banner.banner + '}', file=self.tex)
-        print(r'\end{center}', file=self.tex)
-
-    def latex_ending(self) -> None:
-        """Finalize and compile the LaTeX document"""
-        print(r'\end{document}', file=self.tex)
-        self.tex.close()
-        
-        # Run pdflatex twice for proper rendering
-        for _ in range(2):
-            os.system(f'pdflatex -interaction=nonstopmode {self.tex_file} > /dev/null 2>&1') #> /dev/null 2>&1
-
 class Excel_Stats:
     """Generate Excel statistics reports"""
 
@@ -455,3 +355,248 @@ class Excel_Stats:
         df = pd.DataFrame.from_dict(self.excel_dict, orient='index').T
         df = df.set_index('sample')
         df.to_excel(self.excel_filename)
+
+
+class SummaryLog:
+    """Condensed run summary log that records tool versions, section timings,
+    and any errors encountered during a pipeline run."""
+
+    def __init__(self, sample_name: str, script_version: str, args=None):
+        self.sample_name = sample_name
+        self.script_version = script_version
+        self.date_stamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        self.log_file = f'{sample_name}_{self.date_stamp}_summary.log'
+        self._versions: Dict[str, str] = {}
+        self._sections: list = []  # list of (name, start, end, status)
+        self._errors: list = []    # list of (timestamp, message)
+        self._current_section: Optional[tuple] = None
+        self._args = args
+        self.git_branch: str = 'unknown'
+        self.git_commit: str = 'unknown'
+
+    # -- tool versions --------------------------------------------------------
+
+    def collect_versions(self):
+        """Probe external tools and record their version strings."""
+        import subprocess
+        import shutil as _shutil
+
+        self._collect_git_info()
+
+        self._versions['Python'] = self._run_version('python3', ['python3', '--version'])
+        self._versions['Biopython'] = self._python_module_version('Bio')
+        self._versions['pandas'] = self._python_module_version('pandas')
+
+        tool_cmds = [
+            ('kraken2',    ['kraken2', '--version']),
+            ('SPAdes',     ['spades.py', '--version']),
+            ('seqkit',     ['seqkit', 'version']),
+            ('BWA',        ['bwa']),
+            ('samtools',   ['samtools', '--version']),
+            ('blastn',     ['blastn', '-version']),
+            ('Picard',     ['picard', 'MarkDuplicates', '--version']),
+            ('freebayes',  ['freebayes', '--version']),
+            ('pigz',       ['pigz', '--version']),
+        ]
+
+        for name, cmd in tool_cmds:
+            if _shutil.which(cmd[0]) is None:
+                continue
+            self._versions[name] = self._run_version(name, cmd)
+
+        # bracken — has no simple --version flag; extract from conda list
+        if _shutil.which('bracken'):
+            ver = self._run_version('bracken', ['conda', 'list', 'bracken'])
+            # Parse conda list output: "bracken  2.9  ..."
+            for line in ver.splitlines() if '\n' in ver else [ver]:
+                if line.startswith('bracken'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        self._versions['bracken'] = f'bracken {parts[1]}'
+                        break
+            else:
+                self._versions['bracken'] = 'installed (version unknown)'
+
+    def _collect_git_info(self):
+        """Capture the git branch and short commit of the running code (for QA)."""
+        import subprocess
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
+        try:
+            self.git_branch = subprocess.run(
+                ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                cwd=repo_dir, capture_output=True, text=True, timeout=10,
+            ).stdout.strip() or 'unknown'
+            self.git_commit = subprocess.run(
+                ['git', 'rev-parse', '--short', 'HEAD'],
+                cwd=repo_dir, capture_output=True, text=True, timeout=10,
+            ).stdout.strip() or 'unknown'
+        except Exception:
+            self.git_branch = 'unknown'
+            self.git_commit = 'unknown'
+        if self.git_branch == 'unknown' or self.git_commit == 'unknown':
+            branch, commit = self._git_info_from_files(repo_dir)
+            if branch and self.git_branch == 'unknown':
+                self.git_branch = branch
+            if commit and self.git_commit == 'unknown':
+                self.git_commit = commit
+
+    @staticmethod
+    def _git_info_from_files(start_dir: str):
+        """Read (branch, short commit) straight from the .git directory. Used when
+        the git command cannot run - e.g. an osx-64 (Rosetta) conda env on Apple
+        Silicon, where /usr/bin/git fails to load the arm64-only Command Line
+        Tools. Returns (None, None) outside a repository."""
+        d = os.path.abspath(start_dir)
+        while not os.path.exists(os.path.join(d, '.git')):
+            parent = os.path.dirname(d)
+            if parent == d:
+                return None, None
+            d = parent
+        git_dir = os.path.join(d, '.git')
+        try:
+            if os.path.isfile(git_dir):   # worktree / submodule: "gitdir: <path>"
+                with open(git_dir) as fh:
+                    git_dir = os.path.join(d, fh.read().split('gitdir:', 1)[1].strip())
+            with open(os.path.join(git_dir, 'HEAD')) as fh:
+                head = fh.read().strip()
+            if not head.startswith('ref: '):
+                return 'HEAD', head[:7]      # detached HEAD
+            ref = head[5:]
+            branch = ref[len('refs/heads/'):] if ref.startswith('refs/heads/') else ref
+            common = os.path.join(git_dir, 'commondir')   # worktrees keep refs here
+            if os.path.exists(common):
+                with open(common) as fh:
+                    git_dir = os.path.normpath(os.path.join(git_dir, fh.read().strip()))
+            commit = None
+            ref_path = os.path.join(git_dir, ref)
+            if os.path.exists(ref_path):
+                with open(ref_path) as fh:
+                    commit = fh.read().strip()
+            else:
+                packed = os.path.join(git_dir, 'packed-refs')
+                if os.path.exists(packed):
+                    with open(packed) as fh:
+                        for line in fh:
+                            parts = line.split()
+                            if len(parts) == 2 and parts[1] == ref:
+                                commit = parts[0]
+            return branch, commit[:7] if commit else None
+        except (OSError, IndexError):
+            return None, None
+
+    @staticmethod
+    def _run_version(name: str, cmd: list) -> str:
+        import subprocess
+        import re as _re
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            output = (result.stdout + result.stderr).strip()
+            # Prefer lines containing a version number (e.g. 1.21, v4.2.0)
+            for line in output.splitlines():
+                line = line.strip()
+                if line and _re.search(r'[vV]?\d+\.\d+', line):
+                    return line
+            # Fallback to first non-empty line
+            for line in output.splitlines():
+                line = line.strip()
+                if line:
+                    return line
+            return 'unknown'
+        except Exception:
+            return 'not found'
+
+    @staticmethod
+    def _python_module_version(module_name: str) -> str:
+        try:
+            mod = __import__(module_name)
+            return f'{module_name} {mod.__version__}'
+        except Exception:
+            return 'not installed'
+
+    # -- section timing -------------------------------------------------------
+
+    def start_section(self, name: str):
+        """Mark the start of a pipeline section."""
+        if self._current_section is not None:
+            # Auto-close the previous section
+            self.end_section()
+        self._current_section = (name, datetime.now())
+
+    def end_section(self, status: str = 'OK'):
+        """Mark the end of the current pipeline section."""
+        if self._current_section is None:
+            return
+        name, start = self._current_section
+        self._sections.append((name, start, datetime.now(), status))
+        self._current_section = None
+
+    # -- error capture --------------------------------------------------------
+
+    def log_error(self, message: str):
+        """Record an error for the summary."""
+        self._errors.append((datetime.now().strftime('%H:%M:%S'), message))
+
+    # -- write the summary file -----------------------------------------------
+
+    def write(self):
+        """Write the condensed summary log to disk."""
+        lines = []
+        sep = '-' * 70
+
+        # Header
+        lines.append(sep)
+        lines.append(f'PIPELINE SUMMARY — {self.sample_name}')
+        lines.append(sep)
+        lines.append(f'Date            : {self.date_stamp}')
+        lines.append(f'Script version  : {self.script_version}')
+        lines.append(f'Git branch      : {self.git_branch}')
+        lines.append(f'Git commit      : {self.git_commit}')
+        if self._args:
+            lines.append(f'Target taxon    : {getattr(self._args, "taxon", "N/A")}')
+            lines.append(f'BLAST database  : {getattr(self._args, "blast_db", "N/A")}')
+            lines.append(f'Kraken database : {getattr(self._args, "kraken_db", "N/A")}')
+            lines.append(f'Fast mode       : {getattr(self._args, "fast_mode", False)}')
+            lines.append(f'Debug mode      : {getattr(self._args, "debug", False)}')
+        lines.append('')
+
+        # Tool versions
+        lines.append(sep)
+        lines.append('TOOL VERSIONS')
+        lines.append(sep)
+        for tool, ver in self._versions.items():
+            lines.append(f'  {tool:<16}: {ver}')
+        lines.append('')
+
+        # Section timings
+        lines.append(sep)
+        lines.append(f'{"SECTION":<42} {"TIME":>10}  {"STATUS"}')
+        lines.append(sep)
+        total_seconds = 0
+        for name, start, end, status in self._sections:
+            elapsed = end - start
+            total_seconds += elapsed.total_seconds()
+            elapsed_str = str(elapsed).split('.')[0]  # drop microseconds
+            status_marker = status if status == 'OK' else f'** {status} **'
+            lines.append(f'  {name:<40} {elapsed_str:>10}  {status_marker}')
+        lines.append(sep)
+        # Total
+        m, s = divmod(int(total_seconds), 60)
+        h, m = divmod(m, 60)
+        lines.append(f'  {"TOTAL":<40} {h:02d}:{m:02d}:{s:02d}')
+        lines.append('')
+
+        # Errors
+        if self._errors:
+            lines.append(sep)
+            lines.append(f'ERRORS / WARNINGS  ({len(self._errors)})')
+            lines.append(sep)
+            for ts, msg in self._errors:
+                lines.append(f'  [{ts}] {msg}')
+        else:
+            lines.append(sep)
+            lines.append('No errors recorded.')
+        lines.append(sep)
+        lines.append('')
+
+        with open(self.log_file, 'w') as f:
+            f.write('\n'.join(lines))

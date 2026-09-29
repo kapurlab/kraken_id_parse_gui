@@ -1,0 +1,11 @@
+# Built Kraken2 / Bracken database binaries are NOT committed — they are
+# rebuilt locally from the committed source FASTAs + bin/build_orbivirus_kraken_db.sh.
+# See README.md in this directory.
+*.k2d
+*.kraken
+*kmer_distrib
+_build_tmp/
+taxonomy/
+library/
+seqid2taxid.map
+*.tmp

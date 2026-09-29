@@ -14,9 +14,16 @@ multiprocessing.set_start_method('spawn', True)
 import matplotlib.pyplot as plt
 plt.style.use('seaborn-v0_8-colorblind')
 from matplotlib import pyplot as plt
-cmap = plt.get_cmap('coolwarm')
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Excel_Stats, move_overwrite
+
+
+class BrackenNoReadsError(Exception):
+    """Raised when Bracken produces no output because essentially no reads were
+    classified at the species level — usually the sample does not match the
+    Kraken database (e.g. the wrong --taxon/--kraken_db for this sample).
+    The pipeline treats this as a non-fatal 'nothing found' condition."""
+
 
 class Kraken_Identification(Setup):
     ''' 
@@ -53,7 +60,7 @@ class Kraken_Identification(Setup):
             os.system(f'dvl_krakenreport2krona.sh -i {sample_name}_reportkraken.txt -k {self.kraken_db} -t {sample_name}-jhu-output.txt -o {sample_name}-jhu-Krona_id_graphic.html')
             if not os.path.exists(self.directory):
                 os.mkdir(self.directory)
-            shutil.move(f'{sample_name}-jhu-Krona_id_graphic.html', self.directory)
+            move_overwrite(f'{sample_name}-jhu-Krona_id_graphic.html', self.directory)
             os.remove(f'{sample_name}-jhu-output.txt')
         else:
             if len(FASTQ_list) == 2:
@@ -63,22 +70,26 @@ class Kraken_Identification(Setup):
             else:
                 os.system(f'kraken2 --db {kraken_db} --threads {cpus} {FASTA} --output {sample_name}_outputkraken.txt --report {sample_name}_reportkraken.txt')
 
+        # Nothing downstream can run without Kraken output, so stop with a
+        # non-zero status (exit 0 made a failed run look successful to SLURM).
         if os.path.exists(f'{cwd}/{sample_name}_outputkraken.txt'):
             output = f'{cwd}/{sample_name}_outputkraken.txt'
         else:
-            print(f'\n### Error: Kraken report did not complete')
-            sys.exit(0)
+            print(f'\n### Error: Kraken report did not complete - check that the Kraken '
+                  f'database exists and is valid: {kraken_db}')
+            sys.exit(1)
         if os.path.exists(f'{cwd}/{sample_name}_reportkraken.txt'):
             report = f'{cwd}/{sample_name}_reportkraken.txt'
         else:
-            print(f'\n### Error: Kraken report did not complete')
-            sys.exit(0)
+            print(f'\n### Error: Kraken report did not complete - check that the Kraken '
+                  f'database exists and is valid: {kraken_db}')
+            sys.exit(1)
 
         if self.directory:
             if not os.path.exists(self.directory):
                 os.mkdir(self.directory)
-            shutil.move(report, self.directory)
-            shutil.move(output, self.directory)
+            move_overwrite(report, self.directory)
+            move_overwrite(output, self.directory)
             self.report = f'{cwd}/{self.directory}/{sample_name}_reportkraken.txt'
             self.output = f'{cwd}/{self.directory}/{sample_name}_outputkraken.txt'
             log_file = open("kraken_log.txt", "a")
@@ -87,7 +98,7 @@ class Kraken_Identification(Setup):
             except OSError:
                 log_file.write(f'DB used: {self.kraken_db}')
             log_file.close()
-            shutil.move("kraken_log.txt", self.directory)
+            move_overwrite("kraken_log.txt", self.directory)
 
     def krona_make_graph(self, report):
         '''
@@ -104,57 +115,98 @@ class Kraken_Identification(Setup):
             print(f'\n### Error: Krona HTML did not complete')
             sys.exit(0)
         if self.directory:
-            shutil.move(f'{self.sample_name}_{self.date_stamp}_krona.html', self.directory)
+            move_overwrite(f'{self.sample_name}_{self.date_stamp}_krona.html', self.directory)
             self.krona_html = f'{self.cwd}/{self.directory}/{self.sample_name}_{self.date_stamp}_krona.html'
             
+    @staticmethod
+    def _bracken_prefix():
+        """Bracken 2.x can't live in the modern main env (old-zlib conflict), so it
+        ships in a sibling 'bracken' conda env. Prepend that env's bin to PATH for
+        the call so its own python runs est_abundance.py. Falls back to PATH, and
+        honors an explicit $BRACKEN_BIN override."""
+        override = os.environ.get('BRACKEN_BIN')
+        if override and os.path.exists(override):
+            return f'PATH="{os.path.dirname(os.path.abspath(override))}:$PATH" '
+        cand = os.path.join(os.path.dirname(os.path.dirname(sys.prefix)), 'envs', 'bracken', 'bin')
+        if os.path.exists(os.path.join(cand, 'bracken')):
+            return f'PATH="{cand}:$PATH" '
+        if not shutil.which('bracken'):
+            print('\n### Error: bracken not found. Create it with:\n'
+                  '    CONDA_SUBDIR=osx-64 mamba env create -f conda_setup/environment.bracken.yml',
+                  file=sys.stderr)
+        return ''
+
     def bracken(self, report, output):
-        os.system(f'bracken -d {self.kraken_db} -i {report} -o {self.sample_name}-bracken.txt -r 250')
-        df = pd.read_csv(f'{self.sample_name}-bracken.txt', sep='\t')
+        bracken_txt = f'{self.sample_name}-bracken.txt'
+        if os.path.exists(bracken_txt):
+            os.remove(bracken_txt)
+        os.system(f'{self._bracken_prefix()}bracken -d {self.kraken_db} -i {report} -o {bracken_txt} -r 250')
+        # Bracken writes no output file when no reads are classified at the
+        # species level. Surface that as a clear, catchable condition instead of
+        # a downstream pandas FileNotFoundError.
+        if not os.path.exists(bracken_txt):
+            raise BrackenNoReadsError(
+                'Bracken produced no output — essentially no reads were classified '
+                'at the species level. The sample likely does not match the Kraken '
+                'database (check --taxon and --kraken_db for this sample).')
+        df = pd.read_csv(bracken_txt, sep='\t')
         df.to_excel(f'{self.sample_name}-bracken.xlsx', index=False)
         os.remove(f'{self.sample_name}-bracken.txt')
         self.bracken_excel = f'{os.getcwd()}/{self.sample_name}-bracken.xlsx'
         if self.directory:
-            shutil.move(f'{self.sample_name}-bracken.xlsx', self.directory)
+            move_overwrite(f'{self.sample_name}-bracken.xlsx', self.directory)
             self.bracken_excel = f'{os.getcwd()}/{self.directory}/{self.sample_name}-bracken.xlsx'
 
 class Bracken_Pie_Charts:
+    # Categorical USDA / USWDS palette (official USDA Dark Blue and Dark Green
+    # first, then USWDS color tokens and the usda.gov gold) so neighbouring slices
+    # stay distinct. Each slice's percentage uses whichever of white / ink text
+    # has >= 4.5:1 contrast on it, and the legend lists every taxon with its
+    # percentage, so the chart never relies on color alone (USDA Design and Brand
+    # guidance).
+    PIE_COLORS = ['#002D72', '#005440', '#CEA467', '#005EA2', '#73B3E7',
+                  '#C05600', '#3D4551', '#97D4EA', '#936F38', '#A9AEB1']
+    WHITE_TEXT = {'#002D72', '#005440', '#005EA2', '#C05600', '#3D4551', '#936F38'}
+    UNCLASSIFIED_COLOR = '#DFE1E2'   # USWDS base-lighter
+    INK = '#0B2437'                  # usda.gov text color
+    # Bracken fractions are shares of the species-level reads, so the remainder
+    # is every species under 1% - not unclassified reads (Kraken's unclassified
+    # reads are not part of Bracken's species table at all).
+    OTHER_LABEL = 'other species (<1% each)'
 
     def __init__(self, FASTA=False):
         self.FASTA = FASTA
 
     def run(self, bracken_excel,):
+        from coverage_plot import mpl_report_font
         df = pd.read_excel(bracken_excel)
         df = df[df['fraction_total_reads'] > 0.01 ]
-        df2 = pd.DataFrame([['unclassified', 0, 'na', 0, 0, 0, 1 - df['fraction_total_reads'].sum()]], columns=['name','taxonomy_id','taxonomy_lvl', 'kraken_assigned_reads', 'added_reads', 'new_est_reads', 'fraction_total_reads'])
-        df3 = pd.concat([df, df2])
-        df3 = df3.set_index('name')
-        if self.FASTA:
-            plot = df3.plot.pie(y='fraction_total_reads', title='Identification of Assembled Scaffolds', figsize=(9, 5), cmap=cmap, labeldistance=None, legend=True, autopct='%1.1f%%')
-        else:  #default FASTQ
-            plot = df3.plot.pie(y='fraction_total_reads', title='FASTQ Read Identification', figsize=(9, 5), cmap=cmap, labeldistance=None, legend=True, autopct='%1.1f%%')
-        plot.axis('off')
-        plot.legend(bbox_to_anchor=(0.9, 0.9))
-        plot.yaxis.label.set_visible(False)
-        plot.get_figure().savefig(f'{os.getcwd()}/bracken_pie.png', format='png', bbox_inches='tight')
-        self.pie_chart = f'{os.getcwd()}/bracken_pie.png'
+        slices = list(zip(df['name'], df['fraction_total_reads']))
+        remainder = 1 - df['fraction_total_reads'].sum()
+        if remainder > 0:   # never a negative wedge from float rounding
+            slices.append((self.OTHER_LABEL, remainder))
+        values = [v for _, v in slices]
+        total = sum(values)
+        colors = [self.UNCLASSIFIED_COLOR if name == self.OTHER_LABEL
+                  else self.PIE_COLORS[i % len(self.PIE_COLORS)]
+                  for i, (name, _) in enumerate(slices)]
+        title = 'Identification of Assembled Scaffolds' if self.FASTA else 'FASTQ Read Identification'
 
-    def latex(self, build_latex=False):
-            tex = build_latex
-            print(r'\begin{table}[H]', file=tex)
-            print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-            if self.FASTA:
-                bracken_pie_banner = Banner("FASTA Identifications")
-            else:
-                bracken_pie_banner = Banner("FASTQ Identifications")
-            print(r'\begin{center}', file=tex)
-            print(r'\includegraphics[scale=1]{' + bracken_pie_banner.banner + r'}', file=tex)
-            print(r'\end{center}', file=tex)
-            print(r'\end{adjustbox}', file=tex)
-            print(r'\begin{center}', file=tex)
-            print(r'\includegraphics[scale=0.8]{' + self.pie_chart + r'}', file=tex)
-            print(r'\end{center}', file=tex)
-            print(r'Identified using: \href{https://ccb.jhu.edu/software/kraken2/}{Kraken} and \href{https://ccb.jhu.edu/software/bracken/}{Bracken}', file=tex)
-            print(r'\end{table}', file=tex)
+        with plt.rc_context({'font.family': mpl_report_font(), 'text.color': self.INK}):
+            fig, ax = plt.subplots(figsize=(9, 5))
+            wedges, _labels, pct_texts = ax.pie(
+                values, colors=colors, startangle=90, counterclock=False,
+                autopct=lambda p: f'{p:.1f}%' if p >= 3 else '', pctdistance=0.72,
+                wedgeprops=dict(edgecolor='white', linewidth=1.2), textprops=dict(fontsize=9))
+            for color, text in zip(colors, pct_texts):
+                text.set_color('white' if color in self.WHITE_TEXT else self.INK)
+            ax.legend(wedges, [f'{name} ({v / total:.1%})' for name, v in slices],
+                      loc='center left', bbox_to_anchor=(1.0, 0.5), frameon=False, fontsize=9)
+            ax.set_title(title, fontsize=12, fontweight='bold', color=self.INK)
+            ax.axis('equal')
+            fig.savefig(f'{os.getcwd()}/bracken_pie.png', format='png', bbox_inches='tight', dpi=150)
+            plt.close(fig)
+        self.pie_chart = f'{os.getcwd()}/bracken_pie.png'
 
 
 if __name__ == "__main__": # execute if directly access by the interpreter

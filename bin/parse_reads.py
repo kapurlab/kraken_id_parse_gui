@@ -11,7 +11,7 @@ import subprocess
 import re
 import gzip
 import pandas as pd
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Excel_Stats
 
 __all__ = ['TaxonNotFoundError', 'ParseReads']
 
@@ -144,40 +144,42 @@ class ParseReads(Setup):
         
         # Setup output filenames
         self.r1_out = f"{self.sample_name}_{self.output_prefix}_R1.fastq"
-        self.r2_out = f"{self.sample_name}_{self.output_prefix}_R2.fastq"
-        
+        self.r2_out = f"{self.sample_name}_{self.output_prefix}_R2.fastq" if self.R2 else None
+
         # Run KrakenTools
         cmd = [
             "extract_kraken_reads.py",
             "-k", self.kraken_output,
             "-s1", self.R1,
-            "-s2", self.R2,
             "-t", self.taxid,
             "-o", self.r1_out,
-            "-o2", self.r2_out,
             "--include-children",
             "--fastq-output",
             "--report", self.kraken_report
         ]
-        
+
+        if self.R2:
+            cmd.extend(["-s2", self.R2, "-o2", self.r2_out])
+
         if self.debug:
             print("Debug: Running command:")
             print(" ".join(cmd))
-        
+
         try:
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            
+
             # Count reads and store metrics
             self.r1_count = count_fastq_reads(self.r1_out)
-            self.r2_count = count_fastq_reads(self.r2_out)
+            self.r2_count = count_fastq_reads(self.r2_out) if self.r2_out else 0
             self.total_input_reads = count_fastq_reads(self.R1)
-            
+
             # Parse relevant metrics from report
             self.parse_report_metrics()
-            
+
             # Gzip output files
             gzip_file(self.r1_out)
-            gzip_file(self.r2_out)
+            if self.r2_out:
+                gzip_file(self.r2_out)
             
             if result.stderr:
                 self.stderr = result.stderr
@@ -213,93 +215,6 @@ class ParseReads(Setup):
                     'level': level
                 })
         self.classifications = classifications
-
-    def latex(self, tex):
-        """Generate LaTeX report"""
-        # First table banner and table
-        kraken_banner = Banner("Kraken Classification")
-        
-        # First table - use table environment to keep banner and table together
-        print(r'\begin{table}[H]', file=tex)
-        
-        # Banner at the top
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
-        print(f'\\includegraphics[scale=1]{{{kraken_banner.banner}}}', file=tex)
-        print(r'\end{center}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        
-        # First table with matching width
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{tabular}{p{4cm}|p{8cm}}', file=tex)
-        
-        # Table header
-        # print(r'\hline', file=tex)
-        print(r'Metric & Value \\', file=tex)
-        print(r'\hline', file=tex)
-        
-        # Table content
-        print(f'Target Taxon & {self.metrics["target_taxon"]}\\\\', file=tex)
-        print(f'Taxon ID & {self.metrics["taxid"]}\\\\', file=tex)
-        print(f'Total Input Reads & {self.metrics["total_input_reads"]:,}\\\\', file=tex)
-        print(f'Extracted Reads & {self.metrics["extracted_reads"]:,}\\\\', file=tex)
-        print(f'Extraction Rate & {self.metrics["extraction_rate"]}\%\\\\', file=tex)
-        print(r'\hline', file=tex)
-        
-        print(r'\end{tabular}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\end{table}', file=tex)
-
-        # Second table banner and table
-        detail_banner = Banner("Kraken Detailed Classification")
-        continuation_banner = Banner("Kraken Detailed Classification (Continued from previous page)")
-
-        # Get all classifications to determine table length
-        all_classifications = self.classifications
-        max_rows_per_page = 35  # Based on article class with 1-inch margins
-        total_rows = len(all_classifications)
-        pages_needed = (total_rows + max_rows_per_page - 1) // max_rows_per_page  # Ceiling division
-
-        for page in range(pages_needed):
-            start_idx = page * max_rows_per_page
-            end_idx = min((page + 1) * max_rows_per_page, total_rows)
-            page_classifications = all_classifications[start_idx:end_idx]
-            
-            # Table for this page
-            print(r'\begin{table}[H]', file=tex)
-            
-            # Choose appropriate banner based on whether this is a continuation
-            current_banner = continuation_banner.banner if page > 0 else detail_banner.banner
-            
-            # Use a zero-spaced vbox to eliminate spacing
-            print(r'\noindent\makebox[\textwidth]{%', file=tex)
-            print(f'\\includegraphics[width=\\textwidth]{{{current_banner}}}%', file=tex)
-            print(r'}', file=tex)
-            
-            # No vertical space between banner and table
-            print(r'\vspace{-0.5pt}%', file=tex)  # Tiny negative space to ensure flush alignment
-            
-            # Ensure table has exactly the same width as the banner (textwidth)
-            print(r'\begin{adjustbox}{width=\textwidth}', file=tex)
-            print(r'\begin{tabular}{p{8cm}|c|r|r}', file=tex)
-            
-            # Table header on each page
-            print(r'Taxonomic Name & Level & Reads & Percent \\', file=tex)
-            print(r'\hline', file=tex)
-            
-            # Table content for this page
-            for classif in page_classifications:
-                name = classif['name'].replace('_', '\\_')
-                print(f'{name} & {classif["level"]} & {classif["reads"]:,} & {classif["percent"]:.2f}\\\\', file=tex)
-            print(r'\hline', file=tex)
-            
-            # If this is not the last page, add continuation notice
-            if page < pages_needed - 1:
-                print(r'\multicolumn{4}{r}{\textit{Continued on next page...}} \\', file=tex)
-            
-            print(r'\end{tabular}', file=tex)
-            print(r'\end{adjustbox}', file=tex)
-            print(r'\end{table}', file=tex)
 
     def excel(self, excel_dict):
         """Add metrics to provided excel dictionary"""
@@ -347,8 +262,6 @@ if __name__ == "__main__":
                        required=True, help='Prefix for output FASTQ files')
     parser.add_argument('-d', '--debug', action='store_true', dest='debug',
                        default=False, help='Print debug information')
-    parser.add_argument('-l', '--latex', action='store_true', dest='build_latex',
-                       default=False, help='Generate LaTeX report')
     parser.add_argument('-e', '--excel', action='store_true', dest='build_excel',
                        default=False, help='Generate Excel report')
     parser.add_argument('-v', '--version', action='version',
@@ -375,11 +288,6 @@ if __name__ == "__main__":
     parser.run()
     
     # Generate reports if requested
-    if args.build_latex:
-        latex_report = Latex_Report(parser.sample_name)
-        parser.latex(latex_report.tex)
-        latex_report.latex_ending()
-        
     if args.build_excel:
         excel_stats = Excel_Stats(parser.sample_name)
         parser.excel(excel_stats.excel_dict)

@@ -13,7 +13,7 @@ import textwrap
 import numpy as np
 from Bio import SeqIO
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Excel_Stats
 
 from fastq_stats_seqkit import FASTQ_Stats
 
@@ -23,10 +23,23 @@ class SPAdesDidNotAssembleFASTA(Exception):
     """Custom exception for when SPAdes assembly fails - Likely due to input reads."""
     pass
 
+#: Hard ceiling on a single SPAdes invocation. SPAdes' internal k-mer coverage
+#: model fit (used for graph simplification, independent of --only-assembler)
+#: can converge very slowly on read sets with an unusually uniform coverage
+#: distribution — observed with shallow, low-diversity viral/Orbivirus
+#: segments — doubling its iteration count each retry (32, 64, 128, 256...).
+#: It normally still converges, just slowly, so this ceiling is generous
+#: rather than tight; it exists only to bound the rare case where it never
+#: converges at all, so the pipeline fails with a clear message instead of
+#: hanging indefinitely.
+SPADES_TIMEOUT_SECONDS = 7200
+
 class Assemble(Setup):
-    def __init__(self, FASTA=None, FASTQ_R1=None, FASTQ_R2=None, debug=False):
+    def __init__(self, FASTA=None, FASTQ_R1=None, FASTQ_R2=None, debug=False, fast_mode=False):
         # First call parent class initialization
         super().__init__(FASTA=FASTA, FASTQ_R1=FASTQ_R1, FASTQ_R2=FASTQ_R2, debug=debug)
+
+        self.fast_mode = fast_mode
         
         # Ensure sample_name is set
         if not hasattr(self, 'sample_name'):
@@ -53,14 +66,55 @@ class Assemble(Setup):
         debug = self.debug
 
         self.print_run_time('SPAdes')
+
+        # Optimized SPAdes parameters to reduce system load
+        if self.fast_mode:
+            # Aggressive optimization for slower systems
+            max_threads = min(2, max(1, self.cpus // 4))  # Use fewer threads
+            memory_limit = 4                              # Use less RAM
+            k_mers = "21,33"                             # Use only 2 k-mer sizes (faster)
+            print(f"Fast mode: SPAdes will use {max_threads} threads, max {memory_limit}GB RAM, k-mers: {k_mers}")
+        else:
+            # Standard optimization - balance speed vs system responsiveness
+            max_threads = min(4, max(1, self.cpus // 2))  # Use at most 4 threads or half available CPUs
+            memory_limit = 8                              # Limit to 8GB RAM
+            k_mers = "21,33,55"                          # Standard k-mer sizes
+            print(f"Standard mode: SPAdes will use {max_threads} threads, max {memory_limit}GB RAM, k-mers: {k_mers}")
+
         if len(FASTQ_list) == 2:
-            subprocess.run(["spades.py", "-1", FASTQ_list[0], "-2", FASTQ_list[1], "-o", "spades_assembly"], capture_output=True)
+            cmd = [
+                "spades.py",
+                "-1", FASTQ_list[0],
+                "-2", FASTQ_list[1],
+                "-o", "spades_assembly",
+                "-t", str(max_threads),           # Limit CPU threads
+                "-m", str(memory_limit),          # Limit memory (GB)
+                "-k", k_mers,                     # Use optimized k-mer sizes
+                "--only-assembler"                # Skip error correction (faster, less RAM)
+            ]
         elif len(FASTQ_list) == 1:
-            subprocess.run(["spades.py", "-s", FASTQ_list[0], "-o", "spades_assembly"], capture_output=True)
+            cmd = [
+                "spades.py",
+                "-s", FASTQ_list[0],
+                "-o", "spades_assembly",
+                "-t", str(max_threads),           # Limit CPU threads
+                "-m", str(memory_limit),          # Limit memory (GB)
+                "-k", k_mers,                     # Use optimized k-mer sizes
+                "--only-assembler"                # Skip error correction (faster, less RAM)
+            ]
         else:
             print(f'\n### Must have either single or paired read set.\n')
             sys.exit(0)
-        
+
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=SPADES_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            print(f'\n### SPAdes did not finish within {SPADES_TIMEOUT_SECONDS // 60} minutes and was '
+                  f'terminated. This usually means its internal coverage-model fit failed to converge '
+                  f'on this read set rather than a resource problem — see spades_assembly/spades.log.\n')
+            raise SPAdesDidNotAssembleFASTA(
+                f'SPAdes timed out after {SPADES_TIMEOUT_SECONDS} seconds (coverage model likely failed to converge)')
+
         if os.path.exists(f'{cwd}/spades_assembly/scaffolds.fasta'):
             shutil.copy2(f'{cwd}/spades_assembly/scaffolds.fasta', f'{cwd}/{self.sample_name}.fasta')
             self.FASTA = f'{cwd}/{self.sample_name}.fasta'
@@ -102,9 +156,18 @@ class Assemble(Setup):
                 mid_size.append(len(rec))
         total_contig_lengths = int(sum(length_list))
 
+        # No usable contigs (empty or headers-only scaffolds). Treat this the
+        # same as "SPAdes did not assemble" — the caller already handles that
+        # exception gracefully (writes the report, shows detected taxa) rather
+        # than crashing on the divisions / empty-array reductions below.
+        if not length_list or total_contig_lengths <= 0:
+            raise SPAdesDidNotAssembleFASTA(
+                'Assembly produced no usable contigs')
+
         if self.FASTQ_R1:
             self.coverage_title = 'FASTQ calculated mean coverage' #read count * read size / total assembly length
-            mean_coverage = ((int(self.R1.num_seqs.replace(',', '')) * float(self.R1.avg_len))*2)/total_contig_lengths
+            read_multiplier = 2 if self.paired else 1
+            mean_coverage = ((int(self.R1.num_seqs.replace(',', '')) * float(self.R1.avg_len)) * read_multiplier) / total_contig_lengths
         else:
             # No FASTQs so calculate mean coverage via SPAdes reportings.
             normalized_list = []
@@ -143,28 +206,6 @@ class Assemble(Setup):
             N50: {bcolors.PURPLE}{self.n50:,}{bcolors.ENDC}, \n \
             {self.coverage_title}: {bcolors.YELLOW}{self.mean_coverage:,.1f}X{bcolors.ENDC}\n')
     
-    def latex(self, build_latex):
-        tex = build_latex
-        blast_banner = Banner("Assembly")
-        print(r'\begin{table}[H]', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
-        print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{center}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{tabular}{ l | l | l | l | l | l }', file=tex)
-        print(f'Contig count & Contig length counts $<$ | 301-999bp | $>$ & Longest contig & Total length & N50 & {self.coverage_title} \\\\', file=tex)
-        print(r'\hline', file=tex)
-        print(f'{self.contig_count:,} & {self.small_contigs_count:,} | {self.mid_size:,} | {self.greater_one_kb_count:,} & {self.longest_contig:,} & {self.total_contig_lengths:,} & {self.n50:,} & {self.mean_coverage:,.1f}X \\\\', file=tex)
-        print(r'\hline', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\vspace{0.1 mm}', file=tex)
-        print(r'\end{tabular}', file=tex)
-        print(r'\\', file=tex)
-        # print(r'\begin{flushleft}Results provided by: \href{https://blast.ncbi.nlm.nih.gov/Blast.cgi}{BLAST}\end{flushleft}', file=tex)
-        print(r'\end{table}', file=tex)
-
     def excel(self, excel_dict):
         excel_dict['Contig count'] = f'{self.contig_count:,}'
         excel_dict['Contig length counts <|301-999bp|>'] = f'{self.small_contigs_count:,}|{self.mid_size:,}|{self.greater_one_kb_count:,}'
@@ -199,11 +240,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         assemble.stats(args.FASTA)
     else:
         print('### Error: Provide FASTQ or FASTA file.  See usda_assembly.py -h for option')
-
-    #Latex report
-    latex_report = Latex_Report(assemble.sample_name)
-    assemble.latex(latex_report.tex)
-    latex_report.latex_ending()
 
     #Excel Stats
     excel_stats = Excel_Stats(assemble.sample_name)

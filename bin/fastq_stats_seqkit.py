@@ -12,7 +12,7 @@ import argparse
 import textwrap
 import humanize
 
-from file_setup import Setup, bcolors, Banner, Latex_Report, Excel_Stats
+from file_setup import Setup, bcolors, Excel_Stats
 
 class FASTQ_Container:
     """Provide nested dot notation to object for each read with stats"""
@@ -75,22 +75,32 @@ class FASTQ_Stats(Setup):
             
             try:
                 with open('temp_fastq_seqkit_stats.txt', 'r') as fopen:
-                    last_line = fopen.readlines()[-1].split()
-                    file_name = last_line[0]
-                    read_format = last_line[1]
-                    seq_type = last_line[2]
-                    num_seqs = last_line[3]
-                    sum_len = last_line[4]
-                    min_len = last_line[5]
-                    avg_len = last_line[6]
-                    max_len = last_line[7]
-                    Q1 = last_line[8]
-                    Q2 = last_line[9]
-                    Q3 = last_line[10]
-                    sum_gap = last_line[11]
-                    N50 = last_line[12]
-                    passQ20 = last_line[13]
-                    passQ30 = last_line[14]
+                    lines = fopen.readlines()
+                # Map values by column NAME, not position: seqkit >= 2.5 inserts an
+                # N50_num column before Q20(%)/Q30(%), which shifted every later
+                # column (Q30 was reported from the Q20 column). A file path with
+                # spaces splits into extra leading tokens, so rejoin those.
+                header = lines[0].split()
+                values = lines[-1].split()
+                extra = len(values) - len(header)
+                if extra > 0:
+                    values = [' '.join(values[:extra + 1])] + values[extra + 1:]
+                col = dict(zip(header, values))
+                file_name = col['file']
+                read_format = col['format']
+                seq_type = col['type']
+                num_seqs = col['num_seqs']
+                sum_len = col['sum_len']
+                min_len = col['min_len']
+                avg_len = col['avg_len']
+                max_len = col['max_len']
+                Q1 = col['Q1']
+                Q2 = col['Q2']
+                Q3 = col['Q3']
+                sum_gap = col['sum_gap']
+                N50 = col['N50']
+                passQ20 = col['Q20(%)']
+                passQ30 = col['Q30(%)']
 
                 os.remove('temp_fastq_seqkit_stats.txt')
 
@@ -118,40 +128,6 @@ class FASTQ_Stats(Setup):
         if len(files_to_process) == 1:
             self.R2 = None
 
-    def latex(self, tex):
-        blast_banner = Banner("FASTQ Quality")
-        print(r'\begin{table}[H]', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\begin{center}', file=tex)
-        print('\includegraphics[scale=1]{' + blast_banner.banner + '}', file=tex)
-        print(r'\end{center}', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\begin{adjustbox}{width=1\textwidth}', file=tex)
-        print(r'\small', file=tex)
-        print(r'\begin{tabular}{ l | l | l }', file=tex)
-        
-        if self.R2:
-            print('Filename & ' + os.path.basename(self.R1.file_name).replace("_", "\_") + ' & ' + os.path.basename(self.R2.file_name).replace("_", "\_") + ' \\\\', file=tex)
-            print(r'\hline', file=tex)
-            print(f'File Size & {self.R1.file_size} & {self.R2.file_size} \\\\', file=tex)
-            print(f'Q30 Passing & {self.R1.passQ30}\% & {self.R2.passQ30}\% \\\\', file=tex)
-            print(f'Mean Read Score & {float(self.R1.read_quality_average):0.1f} & {float(self.R2.read_quality_average):0.1f} \\\\', file=tex)
-            print(f'Average Read Length & {self.R1.avg_len} & {self.R1.avg_len} \\\\', file=tex)
-        else:
-            print('Filename & ' + os.path.basename(self.R1.file_name).replace("_", "\_") + ' & Read 2 \\\\', file=tex)
-            print(r'\hline', file=tex)
-            print(f'File Size & {self.R1.file_size} & N/A \\\\', file=tex)
-            print(f'Q30 Passing & {self.R1.passQ30}\% & N/A \\\\', file=tex)
-            print(f'Mean Read Score & {float(self.R1.read_quality_average):0.1f} & N/A \\\\', file=tex)
-            print(f'Average Read Length & {self.R1.avg_len} & N/A \\\\', file=tex)
-        
-        print(r'\hline', file=tex)
-        print(r'\end{adjustbox}', file=tex)
-        print(r'\vspace{0.1 mm}', file=tex)
-        print(r'\end{tabular}', file=tex)
-        print(r'\\', file=tex)
-        print(r'\end{table}', file=tex)
-    
     def excel(self, excel_dict):
         excel_dict['FASTQ_R1'] = os.path.basename(self.R1.file_name)
         excel_dict['R1 File Size'] = self.R1.file_size
@@ -215,11 +191,6 @@ def main():
         R2 Passing Q30: {bcolors.WHITE}{fastq_stats.R2.passQ30}{bcolors.ENDC} \n \
         R2 Mean Read Score: {bcolors.WHITE}{fastq_stats.R2.read_quality_average}{bcolors.ENDC} \n \
         R2 Average Read Length: {bcolors.WHITE}{fastq_stats.R2.avg_len}{bcolors.ENDC} \n')
-
-    #Latex report
-    latex_report = Latex_Report(fastq_stats.sample_name)
-    fastq_stats.latex(latex_report.tex)
-    latex_report.latex_ending()
 
     #Excel Stats
     excel_stats = Excel_Stats(fastq_stats.sample_name)

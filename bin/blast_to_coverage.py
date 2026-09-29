@@ -43,14 +43,26 @@ class BlastCoverageBridge(Setup):
             with open(self.blast_summary) as f:
                 lines = f.readlines()
             
-            # Convert to dataframe for easier sorting
+            # Convert to dataframe for easier sorting. Each malformed line is
+            # skipped on its own so one bad row doesn't discard every accession.
             parsed_data = []
             for line in lines:
-                count, _, description = line.strip().split('\t')
-                count = int(count.replace(',', ''))  # Handle comma in numbers
-                acc = description.split()[0]  # First word is accession
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    count, _, description = line.split('\t')
+                    count = int(count.replace(',', ''))  # Handle comma in numbers
+                    acc = description.split()[0]  # First word is accession
+                except (ValueError, IndexError) as e:
+                    if self.debug:
+                        print(f"Skipping malformed BLAST summary line: {line!r} ({e})", file=sys.stderr)
+                    continue
                 parsed_data.append({'count': count, 'accession': acc, 'description': description})
-            
+
+            if not parsed_data:
+                return []
+
             df = pd.DataFrame(parsed_data)
             # Sort by count in descending order
             df = df.sort_values('count', ascending=False)

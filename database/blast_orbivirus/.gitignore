@@ -1,0 +1,18 @@
+# Built BLAST database files are not committed — rebuild with
+# bin/add_orbivirus_to_blast.sh from database/source_sequences/. See README.md.
+*.nhr
+*.nin
+*.nsq
+*.ndb
+*.not
+*.ntf
+*.nto
+*.nog
+*.nos
+*.nnd
+*.nni
+*.njs
+*.nal
+*.ndb
+*.nog
+*_input.fasta

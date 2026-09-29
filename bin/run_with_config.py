@@ -155,7 +155,7 @@ def main():
         
         r1_files = sorted(glob.glob(r1_pattern))
         r2_files = sorted(glob.glob(r2_pattern))
-        
+
         if verbose:
             print("=== Found FASTQ files ===")
             print(f"R1 files ({len(r1_files)}):")
@@ -164,7 +164,7 @@ def main():
             print(f"R2 files ({len(r2_files)}):")
             for f in r2_files:
                 print(f"  {f}")
-        
+
         if not r1_files or not r2_files:
             print(f"WARNING: No FASTQ files found matching patterns:")
             print(f"  R1 pattern: {r1_pattern}")
@@ -174,10 +174,10 @@ def main():
             for f in sorted(os.listdir('.')):
                 print(f"  {f}")
             print("\nTrying alternative patterns...")
-            
-            # Try common alternative patterns
+
+            # Try common alternative patterns for R1
             alt_patterns = [
-                '*_R1_*.fastq.gz', '*_1.fastq.gz', '*_1_*.fastq.gz', 
+                '*_R1_*.fastq.gz', '*_1.fastq.gz', '*_1_*.fastq.gz',
                 '*_R1.fastq.gz', '*_R1_*.fastq', '*_1.fastq'
             ]
             for pattern in alt_patterns:
@@ -188,9 +188,10 @@ def main():
                         r1_files = alt_files
                         run_config['r1_pattern'] = pattern
                         print(f"Using alternative R1 pattern: {pattern}")
-            
+
+            # Try common alternative patterns for R2
             alt_patterns = [
-                '*_R2_*.fastq.gz', '*_2.fastq.gz', '*_2_*.fastq.gz', 
+                '*_R2_*.fastq.gz', '*_2.fastq.gz', '*_2_*.fastq.gz',
                 '*_R2.fastq.gz', '*_R2_*.fastq', '*_2.fastq'
             ]
             for pattern in alt_patterns:
@@ -201,31 +202,44 @@ def main():
                         r2_files = alt_files
                         run_config['r2_pattern'] = pattern
                         print(f"Using alternative R2 pattern: {pattern}")
-        
+
+            # If still no R1 files, look for any single FASTQ file (e.g. nanopore)
+            if not r1_files:
+                all_fastq = sorted(glob.glob('*.fastq.gz')) + sorted(glob.glob('*.fastq'))
+                if len(all_fastq) >= 1:
+                    r1_files = [all_fastq[0]]
+                    print(f"Using single FASTQ file as R1: {r1_files[0]}")
+
         # Build command parameters
         cmd = [kraken_script]
-        
+
         # Handle special parameters that need different treatment
         special_params = {
-            'r1_pattern', 'r2_pattern', 'debug', 'specific'
+            'r1_pattern', 'r2_pattern', 'debug', 'fast', 'specific'
         }
-        
+
         # Handle file patterns differently - use the actual first file instead of pattern
+        # Never fall back to passing literal glob strings as arguments
         if r1_files:
             cmd.extend(['-r1', r1_files[0]])
-        elif 'r1_pattern' in run_config:
-            cmd.extend(['-r1', run_config['r1_pattern']])
-            
+        else:
+            print("ERROR: No FASTQ files found. Cannot proceed.")
+            return 1
+
         if r2_files:
             cmd.extend(['-r2', r2_files[0]])
-        elif 'r2_pattern' in run_config:
-            cmd.extend(['-r2', run_config['r2_pattern']])
         
         # Handle debug flag - convert boolean to flag
         if run_config.get('debug'):
             cmd.append('-d')
             if verbose:
                 print("Added debug flag (-d)")
+
+        # Handle fast flag - convert boolean to flag
+        if run_config.get('fast'):
+            cmd.append('--fast')
+            if verbose:
+                print("Added fast flag (--fast)")
         
         # Handle other parameters
         for key, value in run_config.items():

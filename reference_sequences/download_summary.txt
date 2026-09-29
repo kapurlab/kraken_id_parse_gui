@@ -1,0 +1,23 @@
+BTV Reference Sequences Download Summary
+=============================================
+
+Total sequences downloaded: 60
+Total failed downloads: 1
+
+VP2 Database:
+  Successfully downloaded: 32
+  Failed downloads: 1
+
+VP5 Database:
+  Successfully downloaded: 28
+  Failed downloads: 0
+
+Files created:
+  - BTV_VP2_references.fasta (32 sequences)
+  - BTV_VP5_references.fasta (28 sequences)
+  - Download logs and summary
+
+Next steps:
+1. Commit these files to your repository
+2. Use btv_serotyping_pipeline.py for analysis
+3. The pipeline will automatically find and use these reference files

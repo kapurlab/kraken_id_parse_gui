@@ -13,7 +13,14 @@ import pandas as pd
 import multiprocessing
 multiprocessing.set_start_method('spawn', True)
 
-from file_setup import Setup, bcolors, Excel_Stats, apply_mpl_style
+from file_setup import Setup, bcolors, Excel_Stats, apply_mpl_style, move_overwrite
+
+
+class BrackenNoReadsError(Exception):
+    """Raised when Bracken produces no output because essentially no reads were
+    classified at the species level — usually the sample does not match the
+    Kraken database (e.g. the wrong --taxon/--kraken_db for this sample).
+    The pipeline treats this as a non-fatal 'nothing found' condition."""
 
 
 def _available_ram_bytes():
@@ -61,7 +68,6 @@ def _report_percent_classified(report_path):
         return None
 
 plt = apply_mpl_style()
-cmap = plt.get_cmap('coolwarm')
 
 class Kraken_Identification(Setup):
     ''' 
@@ -133,21 +139,26 @@ class Kraken_Identification(Setup):
                   f'See its messages above.{bcolors.ENDC}')
             sys.exit(1)
 
+        # Nothing downstream can run without Kraken output, so stop with a
+        # non-zero status (exit 0 made a failed run look successful to SLURM).
         if os.path.exists(f'{cwd}/{sample_name}_outputkraken.txt'):
             output = f'{cwd}/{sample_name}_outputkraken.txt'
         else:
-            print(f'\n### Error: Kraken report did not complete')
+            print(f'\n### Error: Kraken report did not complete - check that the Kraken '
+                  f'database exists and is valid: {kraken_db}')
             sys.exit(1)
         if os.path.exists(f'{cwd}/{sample_name}_reportkraken.txt'):
             report = f'{cwd}/{sample_name}_reportkraken.txt'
         else:
-            print(f'\n### Error: Kraken report did not complete')
+            print(f'\n### Error: Kraken report did not complete - check that the Kraken '
+                  f'database exists and is valid: {kraken_db}')
             sys.exit(1)
 
         # Say out loud how much was classified — a near-zero number with a
         # plausible-looking Krona is exactly the failure users should not have
         # to discover by squinting at a pie chart.
         pct = _report_percent_classified(report)
+        self.percent_classified = pct
         if pct is not None:
             print(f'\nkraken2 classification: {pct:.1f}% of reads classified against this DB')
             if pct < 5.0:
@@ -159,11 +170,8 @@ class Kraken_Identification(Setup):
         if self.directory:
             if not os.path.exists(self.directory):
                 os.mkdir(self.directory)
-            for src in (report, output):
-                dst = os.path.join(self.directory, os.path.basename(src))
-                if os.path.exists(dst):
-                    os.remove(dst)
-                shutil.move(src, self.directory)
+            move_overwrite(report, self.directory)
+            move_overwrite(output, self.directory)
             self.report = f'{cwd}/{self.directory}/{sample_name}_reportkraken.txt'
             self.output = f'{cwd}/{self.directory}/{sample_name}_outputkraken.txt'
             log_file = open("kraken_log.txt", "a")
@@ -172,10 +180,7 @@ class Kraken_Identification(Setup):
             except OSError:
                 log_file.write(f'DB used: {self.kraken_db}')
             log_file.close()
-            dst_log = os.path.join(self.directory, "kraken_log.txt")
-            if os.path.exists(dst_log):
-                os.remove(dst_log)
-            shutil.move("kraken_log.txt", self.directory)
+            move_overwrite("kraken_log.txt", self.directory)
 
     def krona_make_graph(self, report):
         '''
@@ -199,54 +204,118 @@ class Kraken_Identification(Setup):
             print(f'\n### Error: Krona HTML did not complete')
             sys.exit(1)
         if self.directory:
-            dst = os.path.join(self.directory, f'{self.sample_name}_{self.date_stamp}_krona.html')
-            if os.path.exists(dst):
-                os.remove(dst)
-            shutil.move(f'{self.sample_name}_{self.date_stamp}_krona.html', self.directory)
+            move_overwrite(f'{self.sample_name}_{self.date_stamp}_krona.html', self.directory)
             self.krona_html = f'{self.cwd}/{self.directory}/{self.sample_name}_{self.date_stamp}_krona.html'
         return self.krona_html
-            
+
+    @staticmethod
+    def _bracken_bin_dir():
+        """Where the bracken to run lives: an explicit $BRACKEN_BIN, else a
+        sibling 'bracken' conda env (Bracken 2.x can't share the main env on
+        osx-64 — old-zlib conflict), else None for plain PATH."""
+        override = os.environ.get('BRACKEN_BIN')
+        if override and os.path.exists(override):
+            return os.path.dirname(os.path.abspath(override))
+        cand = os.path.join(os.path.dirname(os.path.dirname(sys.prefix)), 'envs', 'bracken', 'bin')
+        if os.path.exists(os.path.join(cand, 'bracken')):
+            return cand
+        return None
+
+    @classmethod
+    def bracken_available(cls):
+        """True when bracken can run: $BRACKEN_BIN, the sibling env, or PATH.
+        It is optional — it has no macOS/arm64 conda build — so the pipeline
+        checks this and skips Bracken instead of failing without it."""
+        return cls._bracken_bin_dir() is not None or shutil.which('bracken') is not None
+
+    @classmethod
+    def _bracken_prefix(cls):
+        """Prepend the sibling env's bin to PATH for the call so its own python
+        runs est_abundance.py. Falls back to PATH."""
+        bin_dir = cls._bracken_bin_dir()
+        if bin_dir:
+            return f'PATH="{bin_dir}:$PATH" '
+        if not shutil.which('bracken'):
+            print('\n### Error: bracken not found. Create it with:\n'
+                  '    CONDA_SUBDIR=osx-64 mamba env create -f conda_setup/environment.bracken.yml',
+                  file=sys.stderr)
+        return ''
+
     def bracken(self, report, output):
-        rc = subprocess.call(f'bracken -d {self.kraken_db} -i {report} -o {self.sample_name}-bracken.txt -r 250', shell=True)
-        if rc != 0 or not os.path.exists(f'{self.sample_name}-bracken.txt'):
-            # Bracken refuses when the DB lacks its kmer distribution files or
-            # when (near-)nothing was classified. It's an abundance refinement,
-            # not the identification itself — skip it loudly rather than die.
-            print(f'{bcolors.YELLOW}WARNING: bracken exited {rc} — skipping abundance '
-                  f're-estimation (the Kraken report and Krona graph stand on their own).{bcolors.ENDC}')
-            self.bracken_excel = None
-            return
-        df = pd.read_csv(f'{self.sample_name}-bracken.txt', sep='\t')
+        bracken_txt = f'{self.sample_name}-bracken.txt'
+        self.bracken_excel = None
+        if os.path.exists(bracken_txt):
+            os.remove(bracken_txt)
+        rc = subprocess.call(f'{self._bracken_prefix()}bracken -d {self.kraken_db} -i {report} -o {bracken_txt} -r 250', shell=True)
+        # Bracken writes no output file when no reads are classified at the
+        # species level (or it could not run at all, e.g. a DB without its
+        # kmer distribution files). Surface that as a clear, catchable
+        # condition instead of a downstream pandas FileNotFoundError — it is
+        # abundance refinement, not the identification itself.
+        if not os.path.exists(bracken_txt):
+            raise BrackenNoReadsError(
+                f'Bracken produced no output (exit {rc}) — essentially no reads were classified '
+                'at the species level, or the database has no Bracken kmer distribution for '
+                '250 bp reads. The Kraken report and Krona graph stand on their own.')
+        df = pd.read_csv(bracken_txt, sep='\t')
         df.to_excel(f'{self.sample_name}-bracken.xlsx', index=False)
         os.remove(f'{self.sample_name}-bracken.txt')
         self.bracken_excel = f'{os.getcwd()}/{self.sample_name}-bracken.xlsx'
         if self.directory:
-            dst = os.path.join(self.directory, f'{self.sample_name}-bracken.xlsx')
-            if os.path.exists(dst):
-                os.remove(dst)
-            shutil.move(f'{self.sample_name}-bracken.xlsx', self.directory)
+            move_overwrite(f'{self.sample_name}-bracken.xlsx', self.directory)
             self.bracken_excel = f'{os.getcwd()}/{self.directory}/{self.sample_name}-bracken.xlsx'
 
 class Bracken_Pie_Charts:
+    # Categorical USDA / USWDS palette (official USDA Dark Blue and Dark Green
+    # first, then USWDS color tokens and the usda.gov gold) so neighbouring slices
+    # stay distinct. Each slice's percentage uses whichever of white / ink text
+    # has >= 4.5:1 contrast on it, and the legend lists every taxon with its
+    # percentage, so the chart never relies on color alone (USDA Design and Brand
+    # guidance).
+    PIE_COLORS = ['#002D72', '#005440', '#CEA467', '#005EA2', '#73B3E7',
+                  '#C05600', '#3D4551', '#97D4EA', '#936F38', '#A9AEB1']
+    WHITE_TEXT = {'#002D72', '#005440', '#005EA2', '#C05600', '#3D4551', '#936F38'}
+    UNCLASSIFIED_COLOR = '#DFE1E2'   # USWDS base-lighter
+    INK = '#0B2437'                  # usda.gov text color
+    # Bracken fractions are shares of the species-level reads, so the remainder
+    # is every species under 1% - not unclassified reads (Kraken's unclassified
+    # reads are not part of Bracken's species table at all).
+    OTHER_LABEL = 'other species (<1% each)'
 
     def __init__(self, FASTA=False):
         self.FASTA = FASTA
 
     def run(self, bracken_excel,):
+        from coverage_plot import mpl_report_font
         df = pd.read_excel(bracken_excel)
         df = df[df['fraction_total_reads'] > 0.01 ]
-        df2 = pd.DataFrame([['unclassified', 0, 'na', 0, 0, 0, 1 - df['fraction_total_reads'].sum()]], columns=['name','taxonomy_id','taxonomy_lvl', 'kraken_assigned_reads', 'added_reads', 'new_est_reads', 'fraction_total_reads'])
-        df3 = pd.concat([df, df2])
-        df3 = df3.set_index('name')
-        if self.FASTA:
-            plot = df3.plot.pie(y='fraction_total_reads', title='Identification of Assembled Scaffolds', figsize=(9, 5), cmap=cmap, labeldistance=None, legend=True, autopct='%1.1f%%')
-        else:  #default FASTQ
-            plot = df3.plot.pie(y='fraction_total_reads', title='FASTQ Read Identification', figsize=(9, 5), cmap=cmap, labeldistance=None, legend=True, autopct='%1.1f%%')
-        plot.axis('off')
-        plot.legend(bbox_to_anchor=(0.9, 0.9))
-        plot.yaxis.label.set_visible(False)
-        plot.get_figure().savefig(f'{os.getcwd()}/bracken_pie.png', format='png', bbox_inches='tight')
+        slices = list(zip(df['name'], df['fraction_total_reads']))
+        remainder = 1 - df['fraction_total_reads'].sum()
+        if remainder > 0:   # never a negative wedge from float rounding
+            slices.append((self.OTHER_LABEL, remainder))
+        values = [v for _, v in slices]
+        total = sum(values)
+        colors = [self.UNCLASSIFIED_COLOR if name == self.OTHER_LABEL
+                  else self.PIE_COLORS[i % len(self.PIE_COLORS)]
+                  for i, (name, _) in enumerate(slices)]
+        title = 'Identification of Assembled Scaffolds' if self.FASTA else 'FASTQ Read Identification'
+
+        with plt.rc_context({'font.family': mpl_report_font(), 'text.color': self.INK}):
+            fig, ax = plt.subplots(figsize=(9, 5))
+            wedges, _labels, pct_texts = ax.pie(
+                values, colors=colors, startangle=90, counterclock=False,
+                autopct=lambda p: f'{p:.1f}%' if p >= 3 else '', pctdistance=0.72,
+                wedgeprops=dict(edgecolor='white', linewidth=1.2), textprops=dict(fontsize=9))
+            for color, text in zip(colors, pct_texts):
+                text.set_color('white' if color in self.WHITE_TEXT else self.INK)
+            ax.legend(wedges, [f'{name} ({v / total:.1%})' for name, v in slices],
+                      loc='center left', bbox_to_anchor=(1.0, 0.5), frameon=False, fontsize=9)
+            ax.set_title(title, fontsize=12, fontweight='bold', color=self.INK)
+            ax.axis('equal')
+            fig.savefig(f'{os.getcwd()}/bracken_pie.png', format='png', bbox_inches='tight', dpi=150)
+            plt.close(fig)
         self.pie_chart = f'{os.getcwd()}/bracken_pie.png'
+
 
 if __name__ == "__main__": # execute if directly access by the interpreter
 

@@ -16,3 +16,8 @@ __pycache__/
 
 # node_modules and .vite/ are covered by frontend/.gitignore, backend/jobs/ by
 # backend/.gitignore.
+
+# macOS Finder metadata. The pipeline is also developed on macOS, and a stray
+# .DS_Store in bin/ or database/ would otherwise show as local dirt in every
+# checkout.
+.DS_Store

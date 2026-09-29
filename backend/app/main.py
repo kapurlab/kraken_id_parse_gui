@@ -1484,6 +1484,13 @@ def _result_category(rel: str) -> Optional[str]:
         return "report_pdf"
     if rel == "report.html":
         return "report_html"
+    # The pipeline's own report, <sample>_<stamp>_report.html/.pdf. It is the
+    # one that carries the organism-specific sections — BTV serotyping, segment
+    # status, tentative segments — so it is listed, not left under "all files".
+    if len(parts) == 1 and name.endswith("_report.html"):
+        return "pipeline_report_html"
+    if len(parts) == 1 and name.endswith("_report.pdf"):
+        return "pipeline_report_pdf"
     if name.endswith("_stats.xlsx"):
         return "stats"
     if name.endswith("_krona.html"):
@@ -1512,6 +1519,8 @@ _CATEGORY_ORDER = {
     # Coverage & Variants charts); the PDF is its print rendering.
     "report_html": 0,
     "report_pdf": 1,
+    "pipeline_report_html": 1.3,
+    "pipeline_report_pdf": 1.6,
     "stats": 2,
     "krona": 3,
     "blast_summary": 4,
@@ -1531,6 +1540,10 @@ def _result_label(rel: str, category: Optional[str]) -> str:
         return "Report PDF"
     if category == "report_html":
         return "Report HTML"
+    if category == "pipeline_report_html":
+        return "Pipeline report HTML"
+    if category == "pipeline_report_pdf":
+        return "Pipeline report PDF"
     if category == "stats":
         return "Run statistics workbook"
     if category == "krona":
@@ -1555,7 +1568,8 @@ def _dedupe_primary_results(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     latest_by_category: Dict[str, Dict[str, Any]] = {}
     passthrough: List[Dict[str, Any]] = []
 
-    singleton_categories = {"stats", "krona", "coverage_pdf"}
+    singleton_categories = {"stats", "krona", "coverage_pdf",
+                            "pipeline_report_html", "pipeline_report_pdf"}
     for file in files:
         category = file.get("category")
         if category in singleton_categories:

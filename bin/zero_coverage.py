@@ -133,7 +133,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
     zero_coverage = Zero_Coverage(FASTA=args.FASTA, bam=args.bam, vcf=args.vcf, debug=args.debug)
 
-
     #Excel Stats
     excel_stats = Excel_Stats(zero_coverage.sample_name)
     zero_coverage.excel(excel_stats.excel_dict)

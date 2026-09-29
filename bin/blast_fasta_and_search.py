@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import glob
+import subprocess
 import operator
 from collections import defaultdict
 from collections import Counter
@@ -12,6 +13,7 @@ import textwrap
 from datetime import datetime
 
 from Bio import SeqIO
+from Bio.SeqRecord import SeqRecord
 
 from file_setup import Setup, bcolors, Excel_Stats, safe_move
 
@@ -70,13 +72,140 @@ def _prewarm_blast_db(blast_db):
     _PREWARMED_DBS.add(blast_db)
 
 
+# --- BLAST tuning ----------------------------------------------------------- #
+# Assemblies often contain thousands of short SPAdes fragments; BLASTing them
+# all is the main cause of slow/stalled runs and adds only noise. Keep only
+# informative-length contigs as the query (with a longest-few fallback so we
+# never search an empty file).
+BLAST_MIN_CONTIG_LEN = int(os.environ.get('BLAST_MIN_CONTIG_LEN', '300'))
+BLAST_FALLBACK_KEEP = 50
+# 'dc-megablast' (discontiguous megablast) keeps cross-species sensitivity for
+# viral/segmented targets while being far faster than blastn with a tiny word
+# size. Override with the BLAST_TASK env var if a run needs a different mode.
+BLAST_TASK = os.environ.get('BLAST_TASK', 'dc-megablast')
+# Queries >= 50 kb (the split path: bacterial assemblies and their consensus,
+# large DNA viruses) hit their own species, where megablast (the blastn default
+# used here before dc-megablast) is the right tool; dc-megablast turned a single
+# MTB consensus search from minutes into over an hour. BLAST_TASK_LARGE (or
+# BLAST_TASK) overrides it.
+BLAST_TASK_LARGE = os.environ.get('BLAST_TASK_LARGE') or os.environ.get('BLAST_TASK') or 'megablast'
+# Hard ceiling so a pathological query/database can never hang the pipeline.
+BLAST_TIMEOUT_SECONDS = int(os.environ.get('BLAST_TIMEOUT_SECONDS', '3600'))
+
+
+def _prepare_blast_query(fasta, sample_name, min_len=BLAST_MIN_CONTIG_LEN,
+                         fallback_keep=BLAST_FALLBACK_KEEP):
+    """Return a query FASTA with short SPAdes micro-contigs removed.
+
+    Keeps records >= min_len; if that removes everything, keeps the longest
+    `fallback_keep` so we never BLAST nothing. Returns the original path
+    unchanged when no filtering is needed (e.g. a small consensus FASTA).
+    """
+    try:
+        records = list(SeqIO.parse(fasta, "fasta"))
+    except Exception:
+        return fasta
+    if not records:
+        return fasta
+    kept = [r for r in records if len(r.seq) >= min_len]
+    if not kept:
+        kept = sorted(records, key=lambda r: len(r.seq), reverse=True)[:fallback_keep]
+    if len(kept) == len(records):
+        return fasta
+    out = f'{sample_name}_blast_query.fasta'
+    SeqIO.write(kept, out, "fasta")
+    print(f'{bcolors.BLUE}BLAST query reduced to {len(kept)}/{len(records)} '
+          f'contigs >= {min_len} bp (skipped {len(records) - len(kept)} short '
+          f'fragments to speed up search){bcolors.ENDC}')
+    return out
+
+
+def _run_blast_cmd(cmd):
+    """Run a blastn command with a timeout so it can never stall indefinitely.
+
+    Returns True on success. On timeout or failure it prints a warning and
+    returns False; downstream parsing already tolerates an empty/partial
+    result file, so the pipeline degrades gracefully instead of hanging.
+    """
+    try:
+        subprocess.run(cmd, shell=True, check=True, timeout=BLAST_TIMEOUT_SECONDS)
+        return True
+    except subprocess.TimeoutExpired:
+        print(f'{bcolors.RED}BLAST timed out after {BLAST_TIMEOUT_SECONDS}s; '
+              f'continuing with partial/empty results.{bcolors.ENDC}')
+    except subprocess.CalledProcessError as e:
+        print(f'{bcolors.RED}BLAST exited with code {e.returncode}; '
+              f'continuing with partial/empty results.{bcolors.ENDC}')
+    return False
+
+
+# Columns appended to the BLAST outfmt when chimeric contigs are split, so each
+# hit carries the query span it explains.
+CHIMERA_COLUMNS = 'qstart qend qlen'
+
+
+def _uncovered_parts(blastout_file, query_fasta, min_len=BLAST_MIN_CONTIG_LEN):
+    """Return SeqRecords for contig stretches (>= min_len bp) that the contig's
+    top BLAST hit does not cover.
+
+    Segmented viruses (BTV/EHD, ISAV, ...) share conserved segment termini, so
+    SPAdes can fuse two segments into one contig (e.g. BTV VP5 + VP1). BLAST then
+    reports only the top hit per contig and the fused segment is never seen. The
+    uncovered stretch is returned so it can be searched on its own. Requires
+    CHIMERA_COLUMNS as the last three outfmt columns.
+    """
+    top = {}   # qseqid -> [top subject, [(start, end), ...], qlen]
+    with open(blastout_file) as fh:
+        for line in fh:
+            f = line.rstrip('\n').split('\t')
+            if len(f) < 8:
+                continue
+            try:
+                qstart, qend, qlen = int(f[-3]), int(f[-2]), int(f[-1])
+            except ValueError:
+                continue
+            hit = top.setdefault(f[0], [f[1], [], qlen])
+            if hit[0] == f[1]:
+                hit[1].append((min(qstart, qend), max(qstart, qend)))
+    if not top:
+        return []
+    parts = []
+    for rec in SeqIO.parse(query_fasta, 'fasta'):
+        if rec.id not in top:
+            continue
+        _sacc, spans, qlen = top[rec.id]
+        gaps, pos = [], 1
+        for start, end in sorted(spans):
+            if start > pos:
+                gaps.append((pos, start - 1))
+            pos = max(pos, end + 1)
+        if pos <= qlen:
+            gaps.append((pos, qlen))
+        n = 0
+        for start, end in gaps:
+            seq = rec.seq[start - 1:end]
+            if len(seq) < min_len or seq.upper().count('N') > len(seq) / 2:
+                continue
+            n += 1
+            parts.append(SeqRecord(seq, id=f'{rec.id}_part{n}',
+                                   description=f'{rec.id}:{start}-{end}'))
+    return parts
+
+
 class Blast_Fasta(Setup, bcolors):
-    def __init__(self, FASTA=None, search=None, blast_out=None, format="6 qseqid sacc bitscore pident stitle", num_alignment=3, blast_db="nt"):
+    def __init__(self, FASTA=None, search=None, blast_out=None, format="6 qseqid sacc bitscore pident stitle", num_alignment=3, blast_db="nt", split_chimeras=False):
+        """split_chimeras: after the search, re-BLAST any contig stretch its top
+        hit does not explain (fused segments of a segmented virus) and add those
+        hits to the results. Only used for the de novo assembly search."""
         Setup.__init__(self, FASTA=FASTA)
         sample_name = self.sample_name
         self.blast_db = blast_db
         blastout_file = f'{sample_name}_blast_out.txt'
         self.split_file_list = []  # Initialize split_file_list here
+        split_chimeras = split_chimeras and not blast_out
+        if split_chimeras:
+            format = f'{format} {CHIMERA_COLUMNS}'
+        part_lengths = {}   # chimera part id -> length; parent id -> length explained by its top hit
 
         # Detect HPC system
         self.hpc_system = self.detect_hpc_system()
@@ -85,8 +214,10 @@ class Blast_Fasta(Setup, bcolors):
         if blast_out:
             blastout_file = blast_out
         else:
+            # Drop short micro-contigs before searching (biggest speed win).
+            FASTA = _prepare_blast_query(FASTA, self.sample_name)
             fasta_size = sum([len(seq_record.seq) for seq_record in SeqIO.parse(FASTA, "fasta")])
-
+            
             # Check if we're in a SLURM environment
             is_slurm = shutil.which('sbatch') is not None
             use_slurm = is_slurm and (os.path.isdir("/project") or os.path.isdir("/software/public/databases"))
@@ -118,14 +249,15 @@ class Blast_Fasta(Setup, bcolors):
                             )
                         
                         rsh.write(
-                            f'blastn -query {FASTA} -db {blast_db} -word_size 11 -out {self.sample_name}_blast_out.txt '
+                            f'blastn -query {FASTA} -db {blast_db} -task {BLAST_TASK} -out {self.sample_name}_blast_out.txt '
                             f'-outfmt "{format}" -num_alignments {num_alignment} -num_threads {self.cpus}'
                         )
                     os.system(f'sbatch -W ./batch.sh')
                 else:
-                    # Direct execution without SLURM
-                    os.system(f'blastn -query {FASTA} -db {blast_db} -word_size 11 -out {self.sample_name}_blast_out.txt '
-                            f'-outfmt "{format}" -num_alignments {num_alignment} -num_threads {self.cpus}')
+                    # Direct execution without SLURM (timeout-guarded).
+                    _run_blast_cmd(
+                        f'blastn -query {FASTA} -db {blast_db} -task {BLAST_TASK} -out {self.sample_name}_blast_out.txt '
+                        f'-outfmt "{format}" -num_alignments {num_alignment} -num_threads {self.cpus}')
             else:
                 # Handle large files
                 file_size = os.path.getsize(FASTA)
@@ -187,22 +319,23 @@ class Blast_Fasta(Setup, bcolors):
                             f'ls group_for_blast_*.fasta |cut -d. -f1 > jobs\n'
                             f'names=($(cat jobs))\n'
                             f'echo ${{names[${{SLURM_ARRAY_TASK_ID}}]}}\n'
-                            f'blastn -query ${{names[${{SLURM_ARRAY_TASK_ID}}]}}.fasta -db {blast_db} '
+                            f'blastn -query ${{names[${{SLURM_ARRAY_TASK_ID}}]}}.fasta -db {blast_db} -task {BLAST_TASK_LARGE} '
                             f'-out ${{names[${{SLURM_ARRAY_TASK_ID}}]}}_blastout.txt -outfmt "{format}" '
                             f'-num_alignments {num_alignment} -num_threads {self.cpus}\n'
                             f'rm jobs\n'
                         )
                     os.system('sbatch -W ./batch.sh')
                 else:
-                    # Sequential processing without SLURM
+                    # Sequential processing without SLURM (timeout-guarded).
                     total_files = len(self.split_file_list)
                     for i, split_file in enumerate(self.split_file_list, 1):
                         print(f'  BLAST chunk {i}/{total_files}: {split_file}', flush=True)
-                        os.system(f'blastn -query {split_file} -db {blast_db} '
-                                f'-out {split_file}_blastout.txt -outfmt "{format}" '
-                                f'-num_alignments {num_alignment} -num_threads {self.cpus}')
+                        _run_blast_cmd(
+                            f'blastn -query {split_file} -db {blast_db} -task {BLAST_TASK_LARGE} '
+                            f'-out {split_file}_blastout.txt -outfmt "{format}" '
+                            f'-num_alignments {num_alignment} -num_threads {self.cpus}')
                         print(f'  BLAST chunk {i}/{total_files} complete', flush=True)
-
+                
                 # Concatenate results
                 concatenation = f'{self.sample_name}_blast_out.txt'
                 with open(concatenation, 'wb') as outfile:
@@ -220,7 +353,42 @@ class Blast_Fasta(Setup, bcolors):
                     os.remove(each)
         
         self.blastout_file = blastout_file
-        
+
+        # If BLAST timed out or failed, its output file may be missing. Create an
+        # empty one so parsing yields empty (not crashing) results and still sets
+        # every attribute the pipeline reads downstream (e.g. blast_summary_file).
+        if not os.path.exists(blastout_file):
+            print(f'{bcolors.RED}No BLAST output produced; proceeding with empty '
+                  f'results.{bcolors.ENDC}')
+            open(blastout_file, 'a').close()
+
+        # Fused segments: search each contig stretch its top hit leaves unexplained
+        # and append those hits, so e.g. a VP5 segment fused onto VP1 is identified.
+        if split_chimeras:
+            parts = _uncovered_parts(blastout_file, FASTA)
+            if parts:
+                parts_fasta = f'{sample_name}_blast_chimera_parts.fasta'
+                parts_out = f'{sample_name}_blast_chimera_parts_out.txt'
+                SeqIO.write(parts, parts_fasta, 'fasta')
+                print(f'{bcolors.YELLOW}{len(parts)} contig region(s) not explained by the contig\'s '
+                      f'top BLAST hit (likely fused segments); searching them separately: '
+                      f'{", ".join(p.description for p in parts)}{bcolors.ENDC}')
+                _run_blast_cmd(
+                    f'blastn -query {parts_fasta} -db {blast_db} -task {BLAST_TASK} -out {parts_out} '
+                    f'-outfmt "{format}" -num_alignments {num_alignment} -num_threads {self.cpus}')
+                if os.path.exists(parts_out):
+                    with open(parts_out) as extra, open(blastout_file, 'a') as out:
+                        out.write(extra.read())
+                    os.remove(parts_out)
+                os.remove(parts_fasta)
+                # Credit each stretch to its own hit: the part gets its length and
+                # the parent contig keeps only the length its top hit explains.
+                parent_len = {rec.id: len(rec.seq) for rec in SeqIO.parse(FASTA, 'fasta')}
+                for p in parts:
+                    parent = p.description.rsplit(':', 1)[0]
+                    part_lengths[p.id] = len(p.seq)
+                    part_lengths[parent] = part_lengths.get(parent, parent_len[parent]) - len(p.seq)
+
         # Process BLAST results
         try:
             blast_dict = defaultdict(list)
@@ -252,13 +420,17 @@ class Blast_Fasta(Setup, bcolors):
                     if seq_record.description.lower() in node_list:
                         found_record.append(seq_record)
                 term = search.lower()
-                term = re.sub('[\/.!@#$%^&*()+,"= ]', '_', term)
+                term = re.sub(r'[/.!@#$%^&*()+,"= ]', '_', term)
                 SeqIO.write(found_record, f'{sample_name}_search_{term}.fasta', 'fasta')
 
             acc_frequency = []
             top_hit_acc_norm = []
             norm_dict = {}
             descriptions = {}
+            # Contig lengths (read once, not once per contig); fused-segment parts
+            # and their trimmed parents come from part_lengths.
+            seq_lengths = {rec.id: len(rec.seq) for rec in SeqIO.parse(FASTA, "fasta")}
+            seq_lengths.update(part_lengths)
             for header, description in blast_dict.items():
                 # Get accession frequencies
                 acc_frequency.append(description[0][0])  # top hit, 1st item in hit
@@ -266,8 +438,7 @@ class Blast_Fasta(Setup, bcolors):
                 for acc in acc_frequency:
                     acc_count[acc] += 1
                 # Get FASTA sizes per accessions
-                fasta_dict = SeqIO.to_dict(SeqIO.parse(FASTA, "fasta"))
-                seq_length = len(fasta_dict[header])
+                seq_length = seq_lengths[header]
                 top_hit_acc_norm.append((description[0][0], seq_length))
                 acc_size_collection = defaultdict(list)
                 for acc, size in top_hit_acc_norm:  # collect sizes by accession
@@ -293,7 +464,7 @@ class Blast_Fasta(Setup, bcolors):
             with open(blast_summary_file, 'w') as summary_blast:
                 for acc, count in sorted_norm_dict.items():
                     summary_dict[f'{acc} {descriptions[acc]}'] = f'{count}'
-                    summary_list.append((f'{count:,}', f'{acc_count[acc]:,}', descriptions[acc]))
+                    summary_list.append((f'{count:,}', f'{acc_count[acc]:,}', descriptions[acc], acc))
                     print(f'{count:,}\t{acc_count[acc]:,}\t{acc} {descriptions[acc]}', file=summary_blast)
                     print(f'{bcolors.YELLOW}{count:,}{bcolors.ENDC} nt\t{bcolors.RED}{acc_count[acc]:,}{bcolors.ENDC} contigs\t'
                         f'{bcolors.BLUE}{int(round(count/acc_count[acc])):,}{bcolors.ENDC} nt mean length\t'
@@ -331,190 +502,14 @@ class Blast_Fasta(Setup, bcolors):
 
     def excel(self, excel_dict):
         basename = os.path.basename(self.blast_db)
-        try:
-            excel_dict[f'Top BLAST {basename} Hit - 1'] = f'{self.summary_list[-1][0]} {basename}, {self.summary_list[-1][1]} contigs of {self.summary_list[-1][2][0]} {self.summary_list[-1][2][3]}'
-        except IndexError:
+        if not self.summary_list:
             excel_dict[f'Top BLAST {basename} Hit - 1'] = 'BLAST failed - No Results Output From BLAST search'
-        try:
-            excel_dict[f'Top BLAST {basename} Hit - 2'] = f'{self.summary_list[-2][0]} {basename} {self.summary_list[-2][1]} contigs of {self.summary_list[-2][2][0]} {self.summary_list[-2][2][3]}'
-        except IndexError:
-            pass
-        try:
-            excel_dict[f'Top BLAST {basename} Hit - 3'] = f'{self.summary_list[-3][0]} {basename} {self.summary_list[-3][1]} contigs of {self.summary_list[-3][2][0]} {self.summary_list[-3][2][3]}'
-        except IndexError:
-            pass
-
-
-class Spades_Stats:
-    '''
-
-    '''
-    def __init__(self, fasta_in,):
-        base_name = os.path.basename(fasta_in)
-        self.sample_name = re.sub('[._].*', '', base_name)
-        records = list(SeqIO.parse(fasta_in, "fasta"))
-        cov_length_list=[]
-        contig_count = 0
-        coverage_list=[]
-        length_list=[]
-        small_contigs=[]
-        greater_one_kb=[]
-        mid_size = []
-        for rec in records:
-            header = rec.description
-            try:
-                coverage_value = header.split('_')[5]
-            except IndexError:
-                coverage_value = 1
-            try:
-                coverage_value = int(float(coverage_value))
-            except ValueError:
-                coverage_value = 1
-            cov_length_list.append({'name': rec.description, 'cov': coverage_value, 'length': len(rec)})
-            coverage_list.append(coverage_value)
-            length_list.append(len(rec))
-            contig_count += 1
-            if len(rec) <= 300:
-                small_contigs.append(len(rec))
-            elif len(rec) >= 1000:
-                greater_one_kb.append(len(rec))
-            else:
-                mid_size.append(len(rec))
-        total_contig_lengths = int(sum(length_list))
-
-        #Calculate mean coverage
-        normalized_list = []
-        for rec in records:
-            header = rec.description
-            try:
-                coverage_value = header.split('_')[5]
-            except IndexError:
-                coverage_value = 1
-            try:
-                coverage_value = int(float(coverage_value))
-            except ValueError:
-                coverage_value = 1
-            normalized_list.append((len(rec) / total_contig_lengths) * coverage_value)
-        spades_mean_coverage = sum(normalized_list)
-
-        #N50 calculation
-        all_len = sorted(length_list, reverse=True)
-        csum = np.cumsum(all_len)
-        n2 = int(sum(length_list)/2)
-        csumn2 = min(csum[csum >= n2])
-        ind = np.where(csum == csumn2)
-        self.n50 = all_len[int(ind[0])] # n50 smallest size contig which, along with the larger contigs, contain half of sequence of a particular genome
-        self.l50 = int(ind[0][0]) + 1 # l50 smallest number of contigs whose length sum makes up half of genome
-        self.cov_length_list = cov_length_list
-        self.contig_count = int(contig_count)
-        self.longest_contig = int(max(length_list))
-        self.total_contig_lengths = total_contig_lengths
-        self.spades_mean_coverage = spades_mean_coverage
-        self.small_contigs_count = len(small_contigs)
-        self.greater_one_kb_count = len(greater_one_kb)
-        self.mid_size = len(mid_size)
-        self.spades_version = os.popen("spades.py --version").readlines()[0]
-        
-    def print_by_coverage(self,):
-        for each_dict in sorted(self.cov_length_list, key=itemgetter('cov')):
-            print(f'{each_dict["cov"]:,}X  {each_dict["length"]:,}  {each_dict["name"]}')
-
-    def print_by_length(self,):
-        for each_dict in sorted(self.cov_length_list, key=itemgetter('length')):
-            print(f'{each_dict["length"]:,}  {each_dict["cov"]:,}X  {each_dict["name"]}')
-
-    def write_stats(self, fq=None, build_excel=None, message=None):
-
-        fastq_coverage_title = 'Mean Read Depth: read count * read size / total assembly length'
-        spades_coverage_title = 'Largest k Value Mean Depth: SPAdes reporting'
-
-        print(
-            f'\n'
-            f'Contig count: {bcolors.YELLOW}{self.contig_count:,}{bcolors.ENDC} \n'
-            f'Contig length counts <|301-999bp|>: {bcolors.RED}{self.small_contigs_count:,}{bcolors.ENDC}|{bcolors.BLUE}{self.mid_size:,}{bcolors.ENDC}|{bcolors.GREEN}{self.greater_one_kb_count:,}{bcolors.ENDC} \n'
-            f'Longest contig: {bcolors.GREEN}{self.longest_contig:,}{bcolors.ENDC} \n'
-            f'Total length: {bcolors.BLUE}{self.total_contig_lengths:,}{bcolors.ENDC} \n'
-            f'N50: {bcolors.UNDERLINE}{self.n50:,}{bcolors.ENDC} \n'
-            f'{spades_coverage_title}: {bcolors.YELLOW}{self.spades_mean_coverage:,.1f}X{bcolors.ENDC}\n'
-            )
-
-        if fq: #calculating from FASTQ reads more accurate than spades reporting
-            fastq_mean_coverage = ((fq.read1.total_read_count * fq.read1.length_mean) * 2) / self.total_contig_lengths
-            self.mean_coverage = fastq_mean_coverage  #default to read coverage in reports
-            f'{fastq_coverage_title}: {bcolors.YELLOW}{fastq_mean_coverage:,.1f}X{bcolors.ENDC} \n'
-        else:
-            self.mean_coverage = self.spades_mean_coverage
-
-        if build_excel is None: #just write out a default excel file.
-            #stats to excel
-            ts = time.time()
-            st = datetime.fromtimestamp(ts).strftime('%Y-%m-%d_%H-%M-%S')
-            sample_name = self.sample_name
-            df = pd.DataFrame(index=[sample_name], \
-                columns=[ \
-                    'Read 1', 'R1 File Size', 'R1 Total Reads', 'R1 Mean Length', 'R1 Mean Quality', 'R1 Passing Q30', \
-                    'Read 2', 'R2 File Size', 'R2 Total Reads', 'R2 Mean Length', 'R2 Mean Quality', 'R2 Passing Q30', \
-                    'Assembly Contig Count', '<300bp Count', '301-999bp Count', '>1kb Count', 'Total Length', 'Longest Contig', 'N50', fastq_coverage_title, spades_coverage_title,])
-            try:
-                df.at[sample_name, 'Read 1'] = f'{fq.read1.fastq}'
-                df.at[sample_name, 'R1 File Size'] = f'{fq.read1.file_size}'
-                df.at[sample_name, 'R1 Total Reads'] = f'{fq.read1.total_read_count:,}'
-                df.at[sample_name, 'R1 Mean Length'] = f'{fq.read1.length_mean:.1f}'
-                df.at[sample_name, 'R1 Mean Quality'] = f'{fq.read1.read_average:.1f}'
-                df.at[sample_name, 'R1 Passing Q30'] = f'{fq.read1.reads_gt_q30/fq.read1.sampling_size:0.1%}'
-                all_reads = fq.read1.total_read_count
-            except AttributeError:
-                df.at[sample_name, 'Read 1'] = 'NA'
-                df.at[sample_name, 'R1 File Size'] = 'NA'
-                df.at[sample_name, 'R1 Total Reads'] = 'NA'
-                df.at[sample_name, 'R1 Mean Length'] = 'NA'
-                df.at[sample_name, 'R1 Mean Quality'] = 'NA'
-                df.at[sample_name, 'R1 Passing Q30'] = 'NA'
-            try: 
-                df.at[sample_name, 'Read 2'] = f'{fq.read2.fastq}'
-                df.at[sample_name, 'R2 File Size'] = f'{fq.read2.file_size}'
-                df.at[sample_name, 'R2 Total Reads'] = f'{fq.read2.total_read_count:,}'
-                df.at[sample_name, 'R2 Mean Length'] = f'{fq.read2.length_mean:.1f}'
-                df.at[sample_name, 'R2 Mean Quality'] = f'{fq.read2.read_average:.1f}'
-                df.at[sample_name, 'R2 Passing Q30'] = f'{fq.read2.reads_gt_q30/fq.read2.sampling_size:0.1%}'
-                all_reads = all_reads + fq.read2.total_read_count
-            except AttributeError:
-                df.at[sample_name, 'Read 2'] = 'NA'
-                df.at[sample_name, 'R2 File Size'] = 'NA'
-                df.at[sample_name, 'R2 Total Reads'] = 'NA'
-                df.at[sample_name, 'R2 Mean Length'] = 'NA'
-                df.at[sample_name, 'R2 Mean Quality'] = 'NA'
-                df.at[sample_name, 'R2 Passing Q30'] = 'NA'
-            df.at[sample_name, 'Assembly Contig Count'] = f'{self.contig_count:,}'
-            df.at[sample_name, '<300bp Count'] = f'{self.small_contigs_count:,}'
-            df.at[sample_name, '301-999bp Count'] = f'{self.mid_size:,}'
-            df.at[sample_name, '>1kb Count'] = f'{self.greater_one_kb_count:,}'
-            df.at[sample_name, 'Total Length'] = f'{self.total_contig_lengths:,}'
-            df.at[sample_name, 'Longest Contig'] = f'{self.longest_contig:,}'
-            df.at[sample_name, 'N50'] = f'{self.n50:,}'
-            if fq: #calculating from FASTQ reads more accurate than spades reporting
-                df.at[sample_name, fastq_coverage_title] = f'{fastq_mean_coverage:,.1f}X'
-                df.at[sample_name, spades_coverage_title] = f'{self.spades_mean_coverage:,.1f}X'
-            else:  #when no FASTQ info just use spades reporting
-                df.at[sample_name, fastq_coverage_title] = 'NA'
-                df.at[sample_name, spades_coverage_title] = f'{self.spades_mean_coverage:,.1f}X'
-            df.index.name = 'sample'
-            df.to_excel(f'{sample_name}_{st}_stats.xlsx')
-            self.self_excel = f'{os.getcwd()}/{sample_name}_{st}_stats.xlsx'
-
-        if isinstance(build_excel, pd.DataFrame): #cannot use df as true value, must test with isinstance
-            df = build_excel
-            df.at[df.index[0], 'Assembly Contig Count'] = f'{self.contig_count:,}'
-            df.at[df.index[0], '<300bp Count'] = f'{self.small_contigs_count:,}'
-            df.at[df.index[0], '301-999bp Count'] = f'{self.mid_size:,}'
-            df.at[df.index[0], '>1kb Count'] = f'{self.greater_one_kb_count:,}'
-            df.at[df.index[0], 'Total Length'] = f'{self.total_contig_lengths:,}'
-            df.at[df.index[0], 'Longest Contig'] = f'{self.longest_contig:,}'
-            df.at[df.index[0], 'N50'] = f'{self.n50:,}'
-            df.at[df.index[0], spades_coverage_title] = f'{self.spades_mean_coverage:,.1f}X'
-            if fq:
-                fastq_mean_coverage = ((fq.read1.total_read_count * fq.read1.length_mean) * 2) / self.total_contig_lengths
-                df.at[df.index[0], fastq_coverage_title] = f'{fastq_mean_coverage:,.1f}X'
+            return
+        # summary_list is sorted ascending by nt count, so the top hits are last.
+        # Each entry is (nt count, contigs, description, accession); the
+        # description is a plain string (indexing it used to emit single letters).
+        for rank, (count, contigs, description, acc) in enumerate(reversed(self.summary_list[-3:]), 1):
+            excel_dict[f'Top BLAST {basename} Hit - {rank}'] = f'{count} {basename}, {contigs} contigs of {acc} {description}'
 
 
 if __name__ == "__main__": # execute if directly access by the interpreter
@@ -550,7 +545,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
     #Main script
     blast = Blast_Fasta(FASTA=args.fasta, search=args.search, blast_out=args.blast_out, format=args.format, num_alignment=args.num_alignment, blast_db=args.blast_db)
-
 
     #Excel Stats
     excel_stats = Excel_Stats(blast.sample_name)

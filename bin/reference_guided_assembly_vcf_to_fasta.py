@@ -168,7 +168,6 @@ if __name__ == "__main__":  # execute if directly access by the interpreter
     reference_guided_assembly = Reference_Guided_Assembly(
         FASTA=args.FASTA, vcf=args.vcf, output_name=args.output_name, qual=args.qual, map_quality=args.map_quality, depth=args.depth, iupac=args.iupac)
 
-
     # Excel Stats
     excel_stats = Excel_Stats(reference_guided_assembly.output_name)
     reference_guided_assembly.excel(excel_stats.excel_dict)

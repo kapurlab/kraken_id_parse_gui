@@ -14,13 +14,20 @@ class Downloader:
 
     def __init__(self, accession, cleanup=False):
         self.entrezDbName = 'nucleotide'
-        self.email = 'mickey_mouse@gmail.com'  # Consider using a real email
+        # Use a real NCBI identity when provided. A registered email + API key
+        # raises the E-utilities rate limit (3→10 req/s) and makes NCBI far less
+        # likely to throttle/refuse requests — set NCBI_EMAIL and NCBI_API_KEY in
+        # the environment (get a key at https://www.ncbi.nlm.nih.gov/account/settings/).
+        self.email = os.environ.get('NCBI_EMAIL') or 'mickey_mouse@gmail.com'
+        self.api_key = os.environ.get('NCBI_API_KEY')
         self.accession = accession
         self.cleanup = cleanup
         self.downloaded_files = []
 
     def gbk(self):
         Entrez.email = self.email
+        if self.api_key:
+            Entrez.api_key = self.api_key
         print(f"Downloading {self.accession} gbk")
         try:
             # Add rate limiting to prevent HTTP 400 errors
@@ -42,6 +49,8 @@ class Downloader:
 
     def gff(self):
         Entrez.email = self.email
+        if self.api_key:
+            Entrez.api_key = self.api_key
         print(f"Downloading {self.accession} gff3")
         try:
             # Add rate limiting to prevent HTTP 400 errors
@@ -63,6 +72,8 @@ class Downloader:
 
     def fasta(self):
         Entrez.email = self.email
+        if self.api_key:
+            Entrez.api_key = self.api_key
         print(f"Downloading {self.accession} FASTA")
         try:
             # Add rate limiting to prevent HTTP 400 errors

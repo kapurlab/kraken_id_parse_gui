@@ -144,40 +144,42 @@ class ParseReads(Setup):
         
         # Setup output filenames
         self.r1_out = f"{self.sample_name}_{self.output_prefix}_R1.fastq"
-        self.r2_out = f"{self.sample_name}_{self.output_prefix}_R2.fastq"
-        
+        self.r2_out = f"{self.sample_name}_{self.output_prefix}_R2.fastq" if self.R2 else None
+
         # Run KrakenTools
         cmd = [
             "extract_kraken_reads.py",
             "-k", self.kraken_output,
             "-s1", self.R1,
-            "-s2", self.R2,
             "-t", self.taxid,
             "-o", self.r1_out,
-            "-o2", self.r2_out,
             "--include-children",
             "--fastq-output",
             "--report", self.kraken_report
         ]
-        
+
+        if self.R2:
+            cmd.extend(["-s2", self.R2, "-o2", self.r2_out])
+
         if self.debug:
             print("Debug: Running command:")
             print(" ".join(cmd))
-        
+
         try:
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            
+
             # Count reads and store metrics
             self.r1_count = count_fastq_reads(self.r1_out)
-            self.r2_count = count_fastq_reads(self.r2_out)
+            self.r2_count = count_fastq_reads(self.r2_out) if self.r2_out else 0
             self.total_input_reads = count_fastq_reads(self.R1)
-            
+
             # Parse relevant metrics from report
             self.parse_report_metrics()
-            
+
             # Gzip output files
             gzip_file(self.r1_out)
-            gzip_file(self.r2_out)
+            if self.r2_out:
+                gzip_file(self.r2_out)
             
             if result.stderr:
                 self.stderr = result.stderr
@@ -286,7 +288,6 @@ if __name__ == "__main__":
     parser.run()
     
     # Generate reports if requested
-
     if args.build_excel:
         excel_stats = Excel_Stats(parser.sample_name)
         parser.excel(excel_stats.excel_dict)

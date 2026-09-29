@@ -82,10 +82,11 @@ class Coverage_Graph(Setup):
         
         print(f"Aligning reads to reference...")
             
+        bwa_cmd = ["bwa", "mem", "-t", str(self.cpus), temp_reference, self.FASTQ_R1]
+        if self.FASTQ_R2:
+            bwa_cmd.append(self.FASTQ_R2)
         with open(sam_file, 'w') as sam:
-            subprocess.run(["bwa", "mem", "-t", str(self.cpus), temp_reference, 
-                          self.FASTQ_R1, self.FASTQ_R2],
-                         stdout=sam, check=True)
+            subprocess.run(bwa_cmd, stdout=sam, check=True)
         
         # Convert to BAM and sort
         subprocess.run(["samtools", "view", "-bS", sam_file], 
@@ -191,7 +192,24 @@ class Coverage_Graph(Setup):
             df = df.set_index('position')
             df = df.rename(columns={"depth": f'{chrom}'})
             df_list.append(df)
-        
+
+        # No reads mapped to the reference (e.g. a No_Reference_Available
+        # placeholder, or reads that simply don't match the recovered
+        # reference). There is nothing to plot — skip gracefully instead of
+        # crashing on an empty concat. alignment_stats is already populated.
+        if not df_list:
+            print('No reads mapped to the reference — skipping coverage graph.')
+            self.output_pdf = None
+            if not self.debug:
+                for pattern in ['*.fai', '*.sam', '*.bam', '*.bai', '*.amb', '*.ann',
+                                '*.bwt', '*.pac', '*.sa', temp_reference]:
+                    for f in glob.glob(pattern):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
+            return
+
         table = pd.concat(df_list, axis=1, sort=False)
         table = table.astype(float)
         

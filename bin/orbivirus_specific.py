@@ -9,198 +9,160 @@ from collections import defaultdict
 # home = str(Path.home())
 # sys.path.append(f'{home}/git/gitlab/vsnp3/bin')
 from download_fasta_by_acc import Downloader
+from organism_profiles import OrganismProfile, SegmentedEngine
 
 
-class Orbivirus_Specific():
+# Canonical Orbivirus (BTV/EHD) protein-code -> genome segment number mapping.
+# Serotype is determined by Segment 2 (VP2); Segment 6 is VP5.
+BTV_PROTEIN_TO_SEGMENT = {
+    'VP1': 1, 'VP2': 2, 'VP3': 3, 'VP4': 4, 'NS1': 5,
+    'VP5': 6, 'VP7': 7, 'NS2': 8, 'VP6': 9, 'NS3': 10,
+}
 
-    def order_segments_by_coverage(self, virus_dict):
-        """
-        Orders virus segments based on segment numbers and selects highest coverage when duplicates exist.
-        
-        Args:
-            virus_dict (dict): Dictionary containing virus sequences with headers and coverage info
-            
-        Returns:
-            dict: Ordered dictionary with segments arranged by genome position
 
-        Template"
-            When using this file as a template update the 
-                segment order dictionary (~line 36)
-                if 1 <= potential_segment <= 10: (~line 67)
-                for segment_num in range(1, 11): (~line 79)
-                
-            - Keeping the quotes around the segment names helps with specificity
-            - Note that the FASTA headers are being converted to upper case so keep segment names in upper case
-            to match the FASTA headers
-        """
-        # Segment to genome position mapping
-        segment_order = {
-            '(VP1)': 1, '(VP2)': 2, '(VP3)': 3, '(VP4)': 4, '(NS1)': 5,
-            '(VP5)': 6, '(VP7)': 7, '(NS2)': 8, '(VP6)': 9, '(NS3)': 10,
-            'SEGMENT 1 ': 1, 'SEGMENT 2': 2, 'SEGMENT 3': 3, 'SEGMENT 4': 4,
-            'SEGMENT 5': 5, 'SEGMENT 6': 6, 'SEGMENT 7': 7, 'SEGMENT 8': 8,
-            'SEGMENT 9': 9, 'SEGMENT 10': 10,
-            'SEG 1 ': 1, 'SEG 2': 2, 'SEG 3': 3, 'SEG 4': 4, 'SEG 5': 5,
-            'SEG 6': 6, 'SEG 7': 7, 'SEG 8': 8, 'SEG 9': 9, 'SEG 10': 10
-        }
-        
-        # Initialize dictionary to store sequences by segment number
-        segments = defaultdict(list)
-        
-        # First pass: Classify sequences by segment number
-        for seq_id, seq_info in virus_dict.items():
-            header = seq_info['header'].upper()
-            segment_num = None
-            
-            # Check for VP/NS notation
-            for seg_name, seg_num in segment_order.items():
-                if seg_name in header:
-                    segment_num = seg_num
-                    break
-            
-            # Check for direct segment number notation if no VP/NS found
-            if segment_num is None:
-                # Look for patterns like "segment 1" or just "1" with word boundaries
-                segment_matches = re.findall(r'\b(?:SEGMENT\s*)?(\d{1,2})\b', header)
-                if segment_matches:
-                    try:
-                        potential_segment = int(segment_matches[0])
-                        if 1 <= potential_segment <= 10:  # Valid segment range
-                            segment_num = potential_segment
-                    except ValueError:
-                        continue
-            
-            if segment_num:
-                segments[segment_num].append((seq_id, seq_info))
-        
-        # Create ordered dictionary selecting highest coverage for each segment
-        ordered_dict = {}
-        
-        # Process segments in order (1-10)
-        for segment_num in range(1, 11):
-            if segment_num in segments:
-                # Sort by percent coverage and take the highest
-                best_sequence = max(segments[segment_num], 
-                                key=lambda x: x[1]['percent_covered'])
-                
-                # Add segment information to the sequence info
-                seq_info = best_sequence[1].copy()
-                seq_info['segment_number'] = segment_num
-                
-                # Try to determine segment name from header
-                header = best_sequence[1]['header'].upper()
-                segment_name = f"Segment {segment_num}"
-                for seg_name, seg_num in segment_order.items():
-                    if seg_num == segment_num and seg_name in header:
-                        segment_name = seg_name
-                        break
-                        
-                seq_info['segment_name'] = segment_name
-                ordered_dict[best_sequence[0]] = seq_info
-        
-        return ordered_dict
-    
-    def concatenate_fasta_files(self, ordered_dict, output_file="concatenated_specific.fasta"):
-        """
-        Concatenates downloaded FASTA files based on the ordered dictionary.
-        Preserves segment order and adds segment information to headers.
-        
-        Args:
-            ordered_dict (dict): Ordered dictionary containing sequence information
-            output_file (str): Name of the output file (default: concatenated_sequences.fasta)
-        """
-        with open(output_file, 'w') as outfile:
-            for seq_id, seq_info in ordered_dict.items():
-                # Construct input filename - assuming it matches the accession ID
-                input_file = f"{seq_id}.fasta"
-                
-                try:
-                    with open(input_file, 'r') as infile:
-                        # Read the content of the input file
-                        content = infile.read().strip()
-                        
-                        # Split into header and sequence
-                        parts = content.split('\n', 1)
-                        if len(parts) != 2:
-                            print(f"Warning: Unexpected format in {input_file}")
-                            continue
-                            
-                        header, sequence = parts
-                        
-                        # Add segment information to header if not present
-                        segment_info = f"segment_{seq_info['segment_number']}"
-                        if 'segment_name' in seq_info:
-                            segment_info = f"{segment_info}_{seq_info['segment_name']}"
-                        
-                        # Write modified header and sequence
-                        outfile.write(f"{header} {segment_info}\n")
-                        outfile.write(f"{sequence}\n")
-                        
-                except FileNotFoundError:
-                    print(f"Warning: Could not find file for {seq_id}")
-                    continue
-                    
-        print(f"Concatenation complete. Output written to {output_file}")
+# Whole-word Orbivirus abbreviations, optionally with a serotype suffix
+# ("BTV", "BTV-8", "BTV8", "EHD", "EHDV", "EHDV-2"). The word boundaries keep them
+# from firing on unrelated text that merely contains the letters.
+_BTV_ABBREV = re.compile(r'\bbtv(?:[-_]?\d{1,2})?\b')
+_EHD_ABBREV = re.compile(r'\behdv?(?:[-_]?\d{1,2})?\b')
 
-    def run(self, alignment_stats=None):
-        dict_ordered = self.order_segments_by_coverage(alignment_stats)
-        
-        print(f"Downloading {len(dict_ordered)} Orbivirus segments...")
-        downloaded_count = 0
-        failed_downloads = []
-        
-        for i, (seq_id, seq_inf) in enumerate(dict_ordered.items(), 1):
-            print(f"Downloading segment {i}/{len(dict_ordered)}: {seq_id}")
-            
-            # Add rate limiting - wait 2 seconds between downloads (except for the first)
-            if i > 1:
-                print("  Waiting 2 seconds (NCBI rate limiting)...")
-                time.sleep(2)
-            
-            downloader = Downloader(seq_id)
-            max_retries = 3
-            success = False
-            
-            # Retry logic with exponential backoff
-            for attempt in range(max_retries):
-                try:
-                    downloader.fasta()
-                    success = True
-                    downloaded_count += 1
-                    print(f"  ✓ Successfully downloaded {seq_id}")
-                    break
-                except Exception as e:
-                    print(f"  ⚠ Attempt {attempt + 1} failed for {seq_id}: {e}")
-                    if attempt < max_retries - 1:
-                        wait_time = (attempt + 1) * 5  # 5, 10, 15 seconds
-                        print(f"    Waiting {wait_time} seconds before retry...")
-                        time.sleep(wait_time)
-            
-            if not success:
-                failed_downloads.append(seq_id)
-                print(f"  ✗ Failed to download {seq_id} after {max_retries} attempts")
-        
-        print(f"\nDownload summary:")
-        print(f"  Successfully downloaded: {downloaded_count}/{len(dict_ordered)}")
-        if failed_downloads:
-            print(f"  Failed downloads: {len(failed_downloads)}")
-            print(f"  Failed accessions: {', '.join(failed_downloads)}")
-        
-        # Only proceed with concatenation if we have some successful downloads
-        if downloaded_count > 0:
-            print("Proceeding with concatenation of successfully downloaded segments...")
-            # Filter out failed downloads from the ordered dict
-            successful_dict = {k: v for k, v in dict_ordered.items() if k not in failed_downloads}
-            self.concatenate_fasta_files(successful_dict)
-            
-            # Clean up individual FASTA files
-            for seq_id, seq_inf in successful_dict.items():
-                try:
-                    os.remove(f'{seq_id}.fasta')
-                except FileNotFoundError:
-                    pass  # File already removed or never existed
-        else:
-            print("Warning: No segments were successfully downloaded")
-            # Create an empty output file to prevent downstream errors
-            with open("concatenated_specific.fasta", 'w') as f:
-                f.write(">No_Segments_Available\nNNNNNNNNNN\n")
+
+def orbivirus_species(description):
+    """Return 'BTV', 'EHD' or None for a BLAST/FASTA description.
+
+    The full species names (what GenBank descriptions use) are checked first, so
+    an abbreviation that happens to appear elsewhere in a header (e.g. inside a
+    sample name) can never override the real species; whole-word abbreviations
+    are only the fallback. The ICTV binomial species names (Orbivirus
+    caerulinguae = BTV, Orbivirus ruminantium = EHDV) are recognized too, since
+    newer GenBank titles may use them (as ISAV titles already use "Isavirus
+    salaris"). Shared by the pipeline (species split, report sections) and BTV
+    serotyping so they never disagree."""
+    d = str(description).lower()
+    if 'bluetongue' in d or 'orbivirus caerulinguae' in d:
+        return 'BTV'
+    if 'epizootic hemorrhagic disease' in d or 'orbivirus ruminantium' in d:
+        return 'EHD'
+    if _BTV_ABBREV.search(d):
+        return 'BTV'
+    if _EHD_ABBREV.search(d):
+        return 'EHD'
+    return None
+
+
+def resolve_segment_number(text):
+    """Resolve an Orbivirus genome segment number (1-10) from a FASTA header,
+    reference id, or description.
+
+    This is the single source of truth for segment detection, shared by the
+    coverage-graph segment-status banner and serotyping so they never disagree.
+    It recognizes both explicit "segment N" / "seg N" notation and the protein
+    codes (e.g. VP2 -> segment 2, VP5 -> segment 6). Returns None if no segment
+    can be determined.
+    """
+    if not text:
+        return None
+    t = str(text).upper()
+
+    # Explicit segment notation is most authoritative (handles "segment2",
+    # "segment 2", "segment_2", "seg2", "seg 2"), including the size-class
+    # form "segment S5" / "segment L2" used by some GenBank records (the L/M/S
+    # letter is the segment's size class; the number is still the segment).
+    m = re.search(r'SEGMENT[\s_]*[LMS]?(\d{1,2})', t)
+    if not m:
+        m = re.search(r'\bSEG[\s_]*[LMS]?(\d{1,2})\b', t)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 10:
+            return n
+
+    # Fall back to protein codes (VP1-VP7, NS1-NS3).
+    for code, seg in BTV_PROTEIN_TO_SEGMENT.items():
+        if re.search(r'\b' + code + r'\b', t):
+            return seg
+
+    return None
+
+
+# Numeric contexts in Orbivirus descriptions that are NOT genome-segment
+# numbers and must be ignored by the cautious fallback: serotype
+# ("Bluetongue virus 11", "BTV-8", "serotype 4", "type 2", "genotype 3") and
+# isolate / strain / clone identifiers. Stripping these before counting bare
+# numbers keeps the fallback from mistaking a serotype (BTV-1..BTV-10) for a
+# segment. Over-stripping is safe: it only makes the fallback decline to guess.
+_NON_SEGMENT_CONTEXT = re.compile(
+    r'(?:BLUETONGUE\s+VIRUS'
+    r'|EPIZOOTIC\s+HEMORRHAGIC\s+DISEASE(?:\s+VIRUS)?'
+    r'|BTV|EHDV|EHD|SEROTYPE|TYPE|ISOLATE|STRAIN|CLONE)'
+    r'[\s:\-/]*\d+')
+
+
+def fallback_segment_number(text):
+    """Cautious, low-confidence fallback used ONLY to fill a segment the strict
+    resolver (resolve_segment_number) could not place.
+
+    Returns a segment number (1-10) only when the description contains exactly
+    ONE unambiguous standalone number in that range, after removing obvious
+    non-segment numeric contexts (serotype, isolate, strain, clone, type). If
+    there are zero or conflicting candidates it returns None — deliberately
+    refusing to guess. Callers must flag any result as 'tentative'.
+    """
+    if not text:
+        return None
+    t = str(text).upper()
+    # Remove GenBank accession.version tokens (e.g. "AY636071.1", "NC_012345.2")
+    # and any remaining ".N" version suffix so the version digit is never
+    # counted as a segment number.
+    t = re.sub(r'\b[A-Z]{1,2}_?\d{3,}(?:\.\d+)?', ' ', t)
+    t = re.sub(r'\.\d+', ' ', t)
+    t = _NON_SEGMENT_CONTEXT.sub(' ', t)
+    candidates = set()
+    for m in re.findall(r'\b(\d{1,2})\b', t):
+        n = int(m)
+        if 1 <= n <= 10:
+            candidates.add(n)
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
+
+
+# Cosmetic display tokens for the segment name appended to concatenated headers.
+# (Preserved verbatim from the original order_segments_by_coverage so the
+# reference-guided FASTA descriptions are byte-identical to before.)
+ORBIVIRUS_DISPLAY_ORDER = {
+    '(VP1)': 1, '(VP2)': 2, '(VP3)': 3, '(VP4)': 4, '(NS1)': 5,
+    '(VP5)': 6, '(VP7)': 7, '(NS2)': 8, '(VP6)': 9, '(NS3)': 10,
+    'SEGMENT 1 ': 1, 'SEGMENT 2': 2, 'SEGMENT 3': 3, 'SEGMENT 4': 4,
+    'SEGMENT 5': 5, 'SEGMENT 6': 6, 'SEGMENT 7': 7, 'SEGMENT 8': 8,
+    'SEGMENT 9': 9, 'SEGMENT 10': 10,
+    'SEG 1 ': 1, 'SEG 2': 2, 'SEG 3': 3, 'SEG 4': 4, 'SEG 5': 5,
+    'SEG 6': 6, 'SEG 7': 7, 'SEG 8': 8, 'SEG 9': 9, 'SEG 10': 10,
+}
+
+
+# Declarative profile for Orbivirus (BTV/EHD): 10 segments, Orbivirus' own
+# bespoke serotype-aware resolvers (unchanged), split into BTV vs EHD species.
+ORBIVIRUS_PROFILE = OrganismProfile(
+    name='Orbivirus',
+    kind='segmented',
+    n_segments=10,
+    strict_resolver=resolve_segment_number,
+    fallback_resolver=fallback_segment_number,
+    display_order=ORBIVIRUS_DISPLAY_ORDER,
+    unit_noun='segment',
+    empty_placeholder='>No_Segments_Available\nNNNNNNNNNN\n',
+    species_split=[
+        (('bluetongue virus',), 'BTV'),
+        (('epizootic hemorrhagic disease',), 'EHD'),
+    ],
+)
+
+
+class Orbivirus_Specific(SegmentedEngine):
+    """Thin subclass kept for backward compatibility with existing call sites
+    (``Orbivirus_Specific().run(...)`` / ``.order_segments_by_coverage(...)``).
+    All behavior lives in the shared SegmentedEngine, driven by ORBIVIRUS_PROFILE.
+    """
+
+    def __init__(self):
+        super().__init__(ORBIVIRUS_PROFILE)

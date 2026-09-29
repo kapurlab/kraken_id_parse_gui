@@ -77,16 +77,52 @@ class Alignment(Setup):
         os.system(f'samtools view -Sb {samfile} -o {all_bamfile}')
         os.system(f'samtools sort {all_bamfile} -o {sorted_bamfile}')
         os.system(f'samtools index {sorted_bamfile}')
-        os.system(f'picard MarkDuplicates INPUT={sorted_bamfile} OUTPUT={nodup_bamfile} ASSUME_SORTED=true REMOVE_DUPLICATES=true METRICS_FILE=dup_metrics.csv') # 2> /dev/null')
-        dup_metrics_df = pd.read_csv('dup_metrics.csv', delimiter='\t', skiprows=6, nrows=1)
-        self.UNPAIRED_READS_EXAMINED = int(dup_metrics_df['UNPAIRED_READS_EXAMINED'])
-        self.READ_PAIRS_EXAMINED = int(dup_metrics_df['READ_PAIRS_EXAMINED'])
-        self.SECONDARY_OR_SUPPLEMENTARY_RDS = int(dup_metrics_df['SECONDARY_OR_SUPPLEMENTARY_RDS'])
-        self.UNMAPPED_READS = int(dup_metrics_df['UNMAPPED_READS'])
-        self.UNPAIRED_READ_DUPLICATES = int(dup_metrics_df['UNPAIRED_READ_DUPLICATES'])
-        self.READ_PAIR_DUPLICATES = int(dup_metrics_df['READ_PAIR_DUPLICATES'])
-        self.READ_PAIR_OPTICAL_DUPLICATES = int(dup_metrics_df['READ_PAIR_OPTICAL_DUPLICATES'])
-        self.PERCENT_DUPLICATION	 = float(dup_metrics_df['PERCENT_DUPLICATION'])
+        os.makedirs('./picard_tmp', exist_ok=True)
+        mark_duplicates_result = os.system(f'picard MarkDuplicates INPUT={sorted_bamfile} OUTPUT={nodup_bamfile} ASSUME_SORTED=true REMOVE_DUPLICATES=true METRICS_FILE=dup_metrics.csv TMP_DIR=./picard_tmp') # 2> /dev/null')
+
+        # Check if MarkDuplicates succeeded and dup_metrics.csv was created
+        if mark_duplicates_result == 0 and os.path.exists('dup_metrics.csv'):
+            try:
+                dup_metrics_df = pd.read_csv('dup_metrics.csv', delimiter='\t', skiprows=6, nrows=1)
+                # Take the single metrics row explicitly: pandas >= 3 no longer
+                # converts a one-element Series with int()/float() (TypeError),
+                # which silently zeroed every duplication metric below.
+                metrics = dup_metrics_df.iloc[0]
+                self.UNPAIRED_READS_EXAMINED = int(metrics['UNPAIRED_READS_EXAMINED'])
+                self.READ_PAIRS_EXAMINED = int(metrics['READ_PAIRS_EXAMINED'])
+                self.SECONDARY_OR_SUPPLEMENTARY_RDS = int(metrics['SECONDARY_OR_SUPPLEMENTARY_RDS'])
+                self.UNMAPPED_READS = int(metrics['UNMAPPED_READS'])
+                self.UNPAIRED_READ_DUPLICATES = int(metrics['UNPAIRED_READ_DUPLICATES'])
+                self.READ_PAIR_DUPLICATES = int(metrics['READ_PAIR_DUPLICATES'])
+                self.READ_PAIR_OPTICAL_DUPLICATES = int(metrics['READ_PAIR_OPTICAL_DUPLICATES'])
+                self.PERCENT_DUPLICATION = float(metrics['PERCENT_DUPLICATION'])
+            except Exception as e:
+                print(f"Warning: Failed to read dup_metrics.csv: {e}")
+                # Set default values if metrics cannot be read
+                self.UNPAIRED_READS_EXAMINED = 0
+                self.READ_PAIRS_EXAMINED = 0
+                self.SECONDARY_OR_SUPPLEMENTARY_RDS = 0
+                self.UNMAPPED_READS = 0
+                self.UNPAIRED_READ_DUPLICATES = 0
+                self.READ_PAIR_DUPLICATES = 0
+                self.READ_PAIR_OPTICAL_DUPLICATES = 0
+                self.PERCENT_DUPLICATION = 0.0
+        else:
+            print(f"Warning: MarkDuplicates failed or dup_metrics.csv not created. Using sorted BAM file instead.")
+            # Use sorted BAM file if MarkDuplicates failed
+            nodup_bamfile = sorted_bamfile
+            # Set default values
+            self.UNPAIRED_READS_EXAMINED = 0
+            self.READ_PAIRS_EXAMINED = 0
+            self.SECONDARY_OR_SUPPLEMENTARY_RDS = 0
+            self.UNMAPPED_READS = 0
+            self.UNPAIRED_READ_DUPLICATES = 0
+            self.READ_PAIR_DUPLICATES = 0
+            self.READ_PAIR_OPTICAL_DUPLICATES = 0
+            self.PERCENT_DUPLICATION = 0.0
+        # Clean up picard temp directory
+        if os.path.exists('./picard_tmp'):
+            shutil.rmtree('./picard_tmp')
         os.system(f'samtools index {nodup_bamfile}')
         chrom_ranges = open("chrom_ranges.txt", 'w')
         for record in SeqIO.parse(reference, "fasta"):
@@ -182,24 +218,30 @@ class Alignment(Setup):
         temp_dir = './temp'
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
+
         files_grab = []
         for files in ('*_unmapped*.fastq.gz', '*_all.bam', '*.bai', '*_mapfix_hapall.vcf', '*_unfiltered_hapall.vcf', '*.sam', '*.amb', '*.ann', '*.bwt', '*.pac', '*.fasta.sa', '*_sorted.bam', '*.dict', 'chrom_ranges.txt', '*.fai', 'dup_metrics.csv'):
             files_grab.extend(glob.glob(files))
+
         for each in files_grab:
-            _safe_move(each, temp_dir)
+            dest_path = os.path.join(temp_dir, os.path.basename(each))
+            # Remove existing file if it exists to prevent shutil.Error
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+            shutil.move(each, temp_dir)
 
         if self.debug is False:
             shutil.rmtree(temp_dir)
 
 
     def excel(self, excel_dict):
+        mapped_reads = self.READ_PAIRS_EXAMINED + self.UNPAIRED_READS_EXAMINED
+        total_reads = mapped_reads + self.UNMAPPED_READS
+        self.freq_unmapped_reads = self.UNMAPPED_READS / total_reads if total_reads else 0.0
         excel_dict['Mapped Paired Reads'] = f'{self.READ_PAIRS_EXAMINED:,}'
         excel_dict['Mapped Single Reads'] = f'{self.UNPAIRED_READS_EXAMINED:,}'
         excel_dict['Unmapped Reads'] = f'{self.UNMAPPED_READS:,}'
         excel_dict['Unmapped Percent'] = f'{(self.freq_unmapped_reads*100):,.1f}%'
-        # if self.unmapped_assemble:
-        #     excel_dict['Unmapped Assembled Contigs'] = f'{self.assemble.contig_count:,}'
-        # else:
         excel_dict['Unmapped Assembled Contigs'] = 'n/a'
         excel_dict['Duplicate Paired Reads'] = f'{self.READ_PAIR_DUPLICATES:,}'
         excel_dict['Duplicate Single Reads'] = f'{self.UNPAIRED_READ_DUPLICATES:,}'
@@ -239,7 +281,6 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     alignment = Alignment(FASTQ_R1=args.FASTQ_R1, FASTQ_R2=args.FASTQ_R2, reference=args.FASTA, gbk=args.gbk, skip_assembly=args.skip_assembly, debug=args.debug)
     alignment.run()
 
-
     #Excel Stats
     excel_stats = Excel_Stats(alignment.sample_name)
     alignment.excel(excel_stats.excel_dict)
@@ -252,7 +293,11 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     for files in ('*.aux', '*.log', '*tex', '*png', '*out', '*_all.bam', '*.bai', '*_mapfix_hapall.vcf', '*_unfiltered_hapall.vcf', '*.sam', '*.amb', '*.ann', '*.bwt', '*.pac', '*.fasta.sa', '*_sorted.bam', '*.dict', 'chrom_ranges.txt', 'dup_metrics.csv', '*.fai'):
         files_grab.extend(glob.glob(files))
     for each in files_grab:
-        _safe_move(each, temp_dir)
+        dest_path = os.path.join(temp_dir, os.path.basename(each))
+        # Remove existing file if it exists to prevent shutil.Error
+        if os.path.exists(dest_path):
+            os.remove(dest_path)
+        shutil.move(each, temp_dir)
 
     # if args.debug is False:
     #     shutil.rmtree(temp_dir)

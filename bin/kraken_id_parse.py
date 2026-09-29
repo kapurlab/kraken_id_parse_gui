@@ -95,6 +95,7 @@ from organism_registry import PROFILES, BESPOKE_TAXA
 from coverage_graph_generator import CoverageGraphGenerator
 from btv_serotyping import BTVSerotyping
 from reporting import build_run_manifest, render_html_report, render_pdf_report, write_manifest
+import orbivirus_beta
 
 
 def _is_btv(description):
@@ -554,6 +555,24 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     logger.info(f"Git branch: {summary_log.git_branch} (commit {summary_log.git_commit})")
     logger.debug(f"Summary log file: {summary_log.log_file}")
 
+    # The Orbivirus (BTV/EHD) analysis is beta: untested, results not to be
+    # trusted. Both reports, the workbook and both logs say so for every run
+    # that takes that path — flagged here from the taxon, and again below if
+    # BTV/EHD results turn up under a broader one (e.g. Viruses).
+    orbivirus_beta_flagged = []
+
+    def flag_orbivirus_beta():
+        if orbivirus_beta_flagged:
+            return
+        orbivirus_beta_flagged.append(True)
+        report.add_beta_notice(orbivirus_beta.TITLE, orbivirus_beta.TEXT, orbivirus_beta.PAGE)
+        excel_stats.excel_dict['Orbivirus Analysis Status'] = orbivirus_beta.SHORT
+        summary_log.log_error(f"{orbivirus_beta.TITLE}: {orbivirus_beta.SHORT}")
+        print(UI.warn(f"{orbivirus_beta.TITLE}. {orbivirus_beta.TEXT}"))
+
+    if orbivirus_beta.applies_to_taxon(args.taxon) and not args.kraken_only:
+        flag_orbivirus_beta()
+
     logger.info("Starting FASTQ quality statistics analysis...")
     logger.debug(f"FASTQ R1: {args.FASTQ_R1}")
     logger.debug(f"FASTQ R2: {args.FASTQ_R2}")
@@ -818,7 +837,10 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                     logger.debug(f"Could not remove {dir_name}: {e}")
 
     def write_structured_reports(status: str, warnings=None):
-        warnings = warnings or []
+        warnings = list(warnings or [])
+        beta_notice = orbivirus_beta.notice() if orbivirus_beta_flagged else None
+        if beta_notice:
+            warnings.append(f"{orbivirus_beta.TITLE}: {orbivirus_beta.TEXT}")
         try:
             output_dir = Path.cwd()
             manifest = build_run_manifest(
@@ -833,6 +855,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                 },
                 output_dir=output_dir,
                 started_at=start_time,
+                beta_notice=beta_notice,
             )
             manifest_path = write_manifest(manifest, output_dir)
             html_path = render_html_report(manifest, output_dir)
@@ -862,6 +885,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                     },
                     output_dir=output_dir,
                     started_at=start_time,
+                    beta_notice=beta_notice,
                 )
                 manifest_path = write_manifest(manifest, output_dir)
                 html_path = render_html_report(manifest, output_dir)
@@ -1865,7 +1889,8 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                     report.add_serotype(btv_serotyping.get_consensus_serotype(),
                                         btv_serotyping.interpretation,
                                         btv_serotyping.predictions,
-                                        tentative_segments=tentative_segments)
+                                        tentative_segments=tentative_segments,
+                                        caveat=orbivirus_beta.SEROTYPE)
                     logger.info(f"BTV serotype prediction: {btv_serotyping.get_consensus_serotype()}")
                 else:
                     logger.warning(f"Skipping BTV serotyping - consensus FASTA not found: {final_consensus}")
@@ -2021,12 +2046,12 @@ if __name__ == "__main__": # execute if directly access by the interpreter
                     descs = coverage_png_generator.png_file_descriptions
                     if btv_pngs:
                         logger.info(f"Adding {len(btv_pngs)} Bluetongue virus coverage graphs")
-                        add_virus_section(report, 'Bluetongue Virus Coverage Graphs',
+                        add_virus_section(report, 'Bluetongue Virus Coverage Graphs (BETA — untested)',
                                           coverage_png_generator, list(btv_pngs.keys()), descs,
                                           tentative_segments=tentative_by_species.get('BTV', set()))
                     if ehd_pngs:
                         logger.info(f"Adding {len(ehd_pngs)} Epizootic Hemorrhagic Disease coverage graphs")
-                        add_virus_section(report, 'Epizootic Hemorrhagic Disease Coverage Graphs',
+                        add_virus_section(report, 'Epizootic Hemorrhagic Disease Coverage Graphs (BETA — untested)',
                                           coverage_png_generator, list(ehd_pngs.keys()), descs,
                                           tentative_segments=tentative_by_species.get('EHD', set()))
                     if other_pngs:
@@ -2056,6 +2081,13 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             raise SystemExit(f"PNG coverage graph generation failed: {e}")
 
 ####################################################################################################################
+
+    # BTV/EHD results can also come out of a broader taxon (e.g. Viruses): the
+    # consensus and coverage sections are then BTV/EHD-specific all the same.
+    if btv_dict or ehv_dict or any(
+            _is_btv(seq.description) or _is_ehd(seq.description)
+            for seq in (renamed_fastas if 'renamed_fastas' in dir() else [])):
+        flag_orbivirus_beta()
 
     # Final report generation: interactive HTML + PDF (WeasyPrint).
     logger.info("Finalizing reports (HTML + PDF)...")
@@ -2226,6 +2258,8 @@ if __name__ == "__main__": # execute if directly access by the interpreter
     write_structured_reports("completed")
 
     logger.info(f"\n{bcolors.GREEN}Bioinformatics pipeline completed successfully!{bcolors.ENDC}")
+    if orbivirus_beta_flagged:
+        logger.warning(f"{orbivirus_beta.TITLE} — {orbivirus_beta.SHORT}")
     logger.info(f"{bcolors.WHITE}Final runtime: {total_runtime}{bcolors.ENDC}\n")
     
 

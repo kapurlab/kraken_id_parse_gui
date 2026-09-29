@@ -25,6 +25,12 @@ const TAXON_PRESETS_FALLBACK = [
   "Isavirus salaris",
 ];
 
+// The Orbivirus (BTV/EHD) analysis is beta. The pipeline's reports, workbook and
+// the Results pane say so too; bin/orbivirus_beta.py holds the same wording and
+// the same taxon rule.
+const ORBIVIRUS_BETA_RE = /\borbivirus\b|\bbluetongue\b|\bepizootic\s+ha?emorrhagic\b|\bBTV\b|\bEHDV?\b/i;
+const isOrbivirusBeta = (t) => ORBIVIRUS_BETA_RE.test(String(t || ""));
+
 function fmtSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1467,6 +1473,15 @@ export default function App() {
                     <option key={p} value={p}>{p}</option>
                   ))}
                 </select>
+                {!krakenOnly && isOrbivirusBeta(taxon) && (
+                  <div className="beta-warning" role="alert">
+                    <strong>BETA — Orbivirus (BTV/EHD) analysis is untested.</strong>{" "}
+                    The Bluetongue virus / Epizootic hemorrhagic disease virus analysis — the
+                    BTV/EHD split, segment assignments and BTV serotype — is still beta: it is
+                    untested and needs further testing. Its results cannot be trusted. Confirm
+                    them by a validated method before acting on them.
+                  </div>
+                )}
                 <div className="add-taxon-row" style={{ display: "flex", gap: 6, marginTop: 8 }}>
                   <input
                     placeholder="Add a new taxon to the list…"

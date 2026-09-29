@@ -73,7 +73,12 @@ def render_html_text(
     env.filters["fmt"] = _format_value
     env.globals["asset_url"] = lambda path: _asset_url(path, asset_mode, base_dir)
     template = env.get_template("report.html.j2")
-    return template.render(report=manifest)
+    try:
+        from orbivirus_beta import notice_for_manifest
+        beta_notice = notice_for_manifest(manifest)
+    except ImportError:
+        beta_notice = manifest.get("beta_notice")
+    return template.render(report=manifest, beta_notice=beta_notice)
 
 
 def render_html_report(manifest: Dict[str, Any], output_dir: Path) -> Path:

@@ -195,6 +195,7 @@ table.data.compact td { padding: 2px 10px; line-height: 1.3; }
   @top-right { content: "{{ date_long }}"; font-size: 9px; color: #565C65; }
   @bottom-left { content: "{{ sample_css }} \\2014  Pathogen Identification Report"; font-size: 9px; color: #565C65; }
   @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 9px; color: #565C65; }
+  {% if beta_css %}@top-left { content: "{{ beta_css }}"; font-size: 9px; font-weight: 700; color: #B50909; }{% endif %}
 }
 /* first page: the Iso-Bar sits at the top of the sheet and the date is in the title band */
 @page :first {
@@ -287,6 +288,7 @@ class HtmlReport:
         self.date_long = now.strftime('%B %d, %Y')
         self.stamp = now.strftime('%Y-%m-%d_%H-%M-%S')
         self.sections = []            # list of html-string blocks (order preserved)
+        self._beta = None             # (title, text, page_line) — see add_beta_notice()
         self._cov_slots = []          # coverage items, swapped per render mode
         # autoescape OFF by design: we inject raw HTML/CSS/JS blocks and escape
         # all dynamic *data* ourselves via self._esc().
@@ -328,6 +330,14 @@ class HtmlReport:
         inner = (f'<div class="notice" style="--notice-border:{border};--notice-bg:{bg};">'
                  f'<span class="level">{label}</span>{self._esc(text)}</div>')
         self._section(title, inner)
+
+    def add_beta_notice(self, title, text, page_line):
+        """Mark the whole report as carrying beta (unvalidated) results.
+
+        Rendered above every other section regardless of call order, and in the
+        PDF also in the top margin of every page, so a single printed page still
+        says it. Used for the Orbivirus (BTV/EHD) analysis (orbivirus_beta.py)."""
+        self._beta = (title, text, page_line)
 
     def add_kv(self, title, rows):
         """Two-column key/value table. rows = [(key, value), ...]."""
@@ -393,7 +403,9 @@ class HtmlReport:
                  f'{a.mean_coverage:,.1f}X']]
         self.add_table('Assembly', headers, rows, num_cols={0, 2, 3, 4, 5})
 
-    def add_serotype(self, consensus, interpretation, predictions, tentative_segments=None):
+    def add_serotype(self, consensus, interpretation, predictions, tentative_segments=None,
+                     caveat=None):
+        """caveat: shown above the call, e.g. that serotyping is still beta."""
         tentative_segments = tentative_segments or set()
         call = self._esc(consensus)
         headers = ['Segment', 'Protein', 'Serotype', 'Top Hit', '% Identity',
@@ -410,8 +422,14 @@ class HtmlReport:
                          p.get('Serotype', '-'), p.get('Top Hit Accession', '-'),
                          p.get('Percent Identity', '-'), p.get('Query Coverage', '-'),
                          p.get('Bitscore', '-'), p.get('E-value', '-')])
-        tbl = ['<div class="serotype-call"><span class="label">Predicted Serotype</span>'
-               f'<span class="badge">{call}</span></div>']
+        tbl = []
+        if caveat:
+            _label, border, bg = self._NOTICE_STYLES['error']
+            tbl.append(f'<div class="notice" style="--notice-border:{border};--notice-bg:{bg};'
+                       f'margin-bottom:12px;"><span class="level">Beta — not validated</span>'
+                       f'{self._esc(caveat)}</div>')
+        tbl.append('<div class="serotype-call"><span class="label">Predicted Serotype</span>'
+                   f'<span class="badge">{call}</span></div>')
         tbl.append('<table class="data"><thead><tr>')
         for i, h in enumerate(headers):
             cls = ' class="num"' if i >= 4 else ''
@@ -470,8 +488,16 @@ class HtmlReport:
     def _render(self, mode):
         css = self._env.from_string(BASE_CSS).render(
             brand_rgb=self.brand, date_long=self.date_long,
-            sample_css=_css_string(self.sample))
+            sample_css=_css_string(self.sample),
+            beta_css=_css_string(self._beta[2]) if self._beta else '')
         body = '\n'.join(self.sections)
+        if self._beta:
+            title, text, _page_line = self._beta
+            _label, border, bg = self._NOTICE_STYLES['error']
+            body = (f'<div class="section"><h2>{self._esc(title)}</h2><div class="sec-body">'
+                    f'<div class="notice" style="--notice-border:{border};--notice-bg:{bg};">'
+                    f'<span class="level">Beta — not validated</span>{self._esc(text)}</div>'
+                    f'</div></div>\n' + body)
         # Swap coverage slots for the chosen mode.
         for slot, it in enumerate(self._cov_slots or []):
             token = f'@@COVSLOT{slot}@@'

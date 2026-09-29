@@ -407,6 +407,7 @@ def build_run_manifest(
     warnings: Optional[List[str]] = None,
     sections: Optional[List[Dict[str, Any]]] = None,
     repo_root: Optional[Path] = None,
+    beta_notice: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     repo_root = repo_root or Path(__file__).resolve().parents[2]
     started = started_at.isoformat() if started_at else None
@@ -424,6 +425,9 @@ def build_run_manifest(
         "run_id": output_dir.name,
         "status": status,
         "warnings": _drop_stale_pdf_warnings(warnings, output_dir),
+        # Set when the run's results are beta (the Orbivirus BTV/EHD analysis,
+        # see orbivirus_beta.py); the report banner and the Results pane read it.
+        "beta_notice": beta_notice,
         "inputs": inputs,
         "parameters": parameters,
         "software": {

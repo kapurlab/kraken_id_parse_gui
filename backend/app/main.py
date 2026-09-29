@@ -1791,6 +1791,20 @@ def _rp_flags(run_dir: Path) -> Dict[str, Any]:
             reasons.insert(0, "the analysis exited %s%s" % (rc, (" — " + detail[:120]) if detail else ""))
     except (OSError, ValueError, AttributeError):
         pass
+    # The Orbivirus (BTV/EHD) analysis is beta — untested, its results not to be
+    # trusted — so its runs are never graded PASS. Runs made before the pipeline
+    # recorded the notice are recognized by their target taxon.
+    try:
+        man = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+        if str(_BIN_DIR) not in sys.path:
+            sys.path.insert(0, str(_BIN_DIR))
+        import orbivirus_beta
+        if orbivirus_beta.notice_for_manifest(man):
+            if level == "pass":
+                level = "review"
+            reasons.append(orbivirus_beta.CHIP)
+    except (OSError, ValueError, AttributeError, ImportError):
+        pass
     return {"level": level, "reasons": reasons}
 
 

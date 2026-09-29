@@ -44,7 +44,7 @@ packagefastqs.sh; d=$(pwd); for f in */; do (cd "$f" && sbatch ${HOME}/git/gitla
 ```
 Edit the 3 settings at the top of `internal/kraken_id_parse.slurm` (`CONDA_PATH`, `CONDA_ENV`, `REPO_ROOT`) once for your HPC. Presets are in `internal/kraken_configs.yaml` (local) / `internal/scomp_kraken_configs.yaml` (HPC).
 
-**BTV serotyping only (standalone, segment 2 / VP2, serotypes 1–27):**
+**BTV serotyping only (standalone, segment 2 / VP2, serotypes 1–27) — BETA, untested; results cannot be trusted:**
 ```bash
 python bin/btv_serotyping.py -i SAMPLE_reference_guided.fasta -o ./sero_out
 ```
@@ -70,6 +70,11 @@ This variable will be used throughout this documentation to reference the reposi
 This pipeline performs taxonomic read filtering, assembly, BLAST analysis, and coverage visualization of WGS data. It consists of several interconnected scripts that can be run individually or as a complete workflow using the wrapper script.
 
 Reads can be extracted by providing a taxonomical name using the `--taxon` option. Additionally, species-specific functions are available that can further parse difficult to distinguish organisms. For example, an Orbivirus function is used when the `--taxon` search "Orbivirus" is called. This will further distinguish reads as Bluetongue Virus or Epizootic Hemorrhagic Disease.
+
+> **BETA — the Orbivirus (BTV/EHD) analysis is untested.** The BTV/EHD split, segment
+> assignments and BTV serotype need further testing, and their results cannot be trusted:
+> confirm them by a validated method before acting on them. Every report, the stats workbook
+> and the GUI say so for each Orbivirus run (`bin/orbivirus_beta.py` holds the wording).
 
 Upon completion, an interactive HTML report, a matching PDF, and an Excel stats workbook are
 created to summarize the run (see [Running (quick start)](#running-quick-start) above for exact
@@ -443,6 +448,11 @@ sbatch ${REPO_ROOT}/internal/kraken_id_parse.slurm orbivirus --override taxon="B
 ```
 
 ## Orbivirus (BTV/EHD) databases and serotyping
+
+> **BETA — the Orbivirus (BTV/EHD) analysis is untested.** The BTV/EHD split, segment
+> assignments and BTV serotype need further testing, and their results cannot be trusted:
+> confirm them by a validated method before acting on them. Every report, the stats workbook
+> and the GUI say so for each Orbivirus run (`bin/orbivirus_beta.py` holds the wording).
 
 The Orbivirus workflow is self-contained under [`database/`](database/README.md):
 

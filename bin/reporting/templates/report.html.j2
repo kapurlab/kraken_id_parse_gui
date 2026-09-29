@@ -124,6 +124,10 @@
   <div class="banner warn">Run status: {{ report.status.replace("_", " ") }} — see the warnings at the end of this report.</div>
 {% endif %}
 
+{% if beta_notice %}
+  <div class="banner danger" role="alert">{{ beta_notice.title }}. {{ beta_notice.text }}</div>
+{% endif %}
+
 <div class="banner">
   {%- if target_taxon %}Target taxon: {{ target_taxon }}{% else %}Taxonomic classification{% endif %}
   {%- if legacy.target.extraction_rate %} &middot; {{ legacy.target.extraction_rate|fmt(2, "%") }} of reads extracted{% endif %}

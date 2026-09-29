@@ -19,6 +19,7 @@ from datetime import datetime
 # Ensure the bin/ directory is importable when run standalone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from orbivirus_specific import resolve_segment_number, orbivirus_species
+import orbivirus_beta
 
 logger = logging.getLogger('kraken_pipeline')
 
@@ -339,6 +340,8 @@ class BTVSerotyping:
         with open(summary_file, 'w') as f:
             f.write("BTV Serotyping Summary\n")
             f.write("=" * 50 + "\n")
+            f.write(f"{orbivirus_beta.TITLE}\n{orbivirus_beta.TEXT}\n")
+            f.write("=" * 50 + "\n")
             f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Input: {self.consensus_fasta}\n\n")
 
@@ -546,7 +549,7 @@ class BTVSerotyping:
         """Add serotyping results to the Excel summary dictionary."""
         consensus = self.get_consensus_serotype()
         excel_dict['BTV Serotype'] = consensus
-        excel_dict['Serotype Interpretation'] = self.interpretation
+        excel_dict['Serotype Interpretation'] = f'{self.interpretation} ({orbivirus_beta.SHORT})'
 
         for pred in self.predictions:
             protein = pred['Protein']
@@ -652,6 +655,8 @@ def main():
         # Print results to console
         print("=" * 60)
         print("BTV SEROTYPING RESULTS")
+        print(orbivirus_beta.TITLE)
+        print(orbivirus_beta.TEXT)
         print("=" * 60)
         print(f"Consensus Serotype: {consensus_serotype}")
         print(f"Interpretation: {serotyper.interpretation}")

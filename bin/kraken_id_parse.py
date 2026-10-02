@@ -2076,8 +2076,16 @@ if __name__ == "__main__": # execute if directly access by the interpreter
             summary_log.end_section('FAILED')
             logger.error(f"Error generating additional PNG coverage graphs: {e}")
             logger.error("PNG coverage graph generation FAILED - stopping pipeline execution")
-            logger.error("This error indicates a problem with BWA alignment or samtools processing")
-            logger.error("Check the debug output above for detailed error messages")
+            if isinstance(e, ImportError):
+                # Name the real cause. A missing Python package is an
+                # environment problem, and the alignment above it was fine.
+                missing = getattr(e, 'name', None) or str(e)
+                logger.error(f"A Python package this environment lacks: {missing}. Install it into the "
+                             "Kraken ID Parse env (conda_setup/environment.yml lists every package the "
+                             "report needs), or rebuild the env from that file.")
+            else:
+                logger.error("This usually means BWA alignment or samtools processing failed")
+                logger.error("Check the debug output above for detailed error messages")
             raise SystemExit(f"PNG coverage graph generation failed: {e}")
 
 ####################################################################################################################

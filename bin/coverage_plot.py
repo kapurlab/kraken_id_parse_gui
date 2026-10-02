@@ -173,10 +173,38 @@ def _fig_title(ref_id, stats, snp_count):
             f"{stats['length']:,} bp · {stats['percent_covered']:.1f}% covered</sub>")
 
 
+# Said once per run, not once per reference: a report with forty segments
+# would otherwise repeat it forty times.
+_NO_PLOTLY_SAID = False
+
+
+def _say_no_plotly():
+    global _NO_PLOTLY_SAID
+    if _NO_PLOTLY_SAID:
+        return
+    _NO_PLOTLY_SAID = True
+    # Same words as coverage_interactive.py, so the two notices read as one.
+    print("  interactive coverage chart skipped: plotly is not installed in this "
+          "environment (the static coverage figure is unaffected).", flush=True)
+
+
 def interactive_div(ref_id, stats, snps=None, no_coverage=None, include_plotlyjs=False):
-    """Return an interactive Plotly coverage figure as an HTML <div> string."""
-    import plotly.graph_objects as go
-    from plotly.offline import plot as _offline_plot
+    """Return an interactive Plotly coverage figure as an HTML <div> string.
+
+    Returns None when plotly is not installed. plotly is optional (the
+    environment.yml says so, and coverage_interactive.py already skips its
+    chart without it), so a missing package must not stop the report: every
+    caller treats a falsy div as "use the static PNG". Before this guard an
+    env built before plotly was added to the spec failed the whole Full
+    identification run here, after an hour of alignment, with "No module
+    named 'plotly'" — reported as a BWA/samtools problem.
+    """
+    try:
+        import plotly.graph_objects as go
+        from plotly.offline import plot as _offline_plot
+    except ImportError:
+        _say_no_plotly()
+        return None
 
     coverage_array = np.asarray(stats['coverage_array'], dtype=float)
     snps = snps or []
@@ -375,7 +403,8 @@ def _selftest(out_dir='coverage_plot_selftest'):
         png = static_png(rid, stats, snps, drop, out_dir=out_dir)
         trace = 'WebGL (Scattergl)' if length > WEBGL_MIN_POINTS else 'SVG (Scatter)'
         print(f'  {rid}: {length:,} bp -> {trace}; static PNG {png}')
-        parts.append(f'<h3>{rid} <small>({trace})</small></h3>{div}'
+        parts.append(f'<h3>{rid} <small>({trace})</small></h3>'
+                     f'{div or "<p><em>interactive chart skipped: plotly is not installed</em></p>"}'
                      f'<img src="{os.path.basename(png)}" style="max-width:760px">')
     html_path = os.path.join(out_dir, 'coverage_plot_selftest.html')
     with open(html_path, 'w') as fh:

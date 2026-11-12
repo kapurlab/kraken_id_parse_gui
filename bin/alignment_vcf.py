@@ -7,6 +7,7 @@ import sys
 import re
 import glob
 import shutil
+import subprocess
 import argparse
 import textwrap
 import zipfile
@@ -20,6 +21,7 @@ from fastq_stats_seqkit import FASTQ_Stats
 # from vsnp3_vcf_annotation import VCF_Annotation
 from assembly import Assemble
 from zero_coverage import Zero_Coverage
+import read_platform
 
 
 def _safe_move(src, dst):
@@ -69,16 +71,22 @@ class Alignment(Setup):
         zero_coverage_vcf = f'{sample_name}_zc.vcf'
         os.system(f'samtools faidx {reference}')
         os.system(f'picard CreateSequenceDictionary REFERENCE={reference} OUTPUT={reference.rsplit(".", 1)[0]}.dict 2> /dev/null')
-        os.system(f'bwa index {reference} 2> /dev/null')
-        if self.paired:
-            os.system(f'bwa mem -M -R "@RG\\tID:{sample_name}\\tSM:{sample_name}\\tPL:ILLUMINA\\tPI:250" -t 8 {reference} {self.FASTQ_R1} {self.FASTQ_R2} > {samfile}')
-        else:
-            os.system(f'bwa mem -M -R "@RG\\tID:{sample_name}\\tSM:{sample_name}\\tPL:ILLUMINA\\tPI:250" -t 8 {reference} {self.FASTQ_R1} > {samfile}')
+        # bwa mem for short reads, minimap2 for nanopore/PacBio (read_platform).
+        platform = read_platform.detect(self.FASTQ_R1, self.FASTQ_R2)
+        self.platform = platform
+        if read_platform.needs_bwa_index(platform):
+            subprocess.run(['bwa', 'index', reference], stderr=subprocess.DEVNULL)
+        with open(samfile, 'w') as sam:
+            subprocess.run(read_platform.map_command(platform, reference, self.FASTQ_R1, self.FASTQ_R2,
+                                                     threads=8, sample=sample_name, mark_secondary=True),
+                           stdout=sam)
         os.system(f'samtools view -Sb {samfile} -o {all_bamfile}')
         os.system(f'samtools sort {all_bamfile} -o {sorted_bamfile}')
         os.system(f'samtools index {sorted_bamfile}')
         os.makedirs('./picard_tmp', exist_ok=True)
-        mark_duplicates_result = os.system(f'picard MarkDuplicates INPUT={sorted_bamfile} OUTPUT={nodup_bamfile} ASSUME_SORTED=true REMOVE_DUPLICATES=true METRICS_FILE=dup_metrics.csv TMP_DIR=./picard_tmp') # 2> /dev/null')
+        # Duplicates by start position are PCR duplicates only for short reads;
+        # on nanopore/PacBio (often amplicons) it would discard true reads.
+        mark_duplicates_result = 1 if platform.long_reads else os.system(f'picard MarkDuplicates INPUT={sorted_bamfile} OUTPUT={nodup_bamfile} ASSUME_SORTED=true REMOVE_DUPLICATES=true METRICS_FILE=dup_metrics.csv TMP_DIR=./picard_tmp') # 2> /dev/null')
 
         # Check if MarkDuplicates succeeded and dup_metrics.csv was created
         if mark_duplicates_result == 0 and os.path.exists('dup_metrics.csv'):
@@ -108,7 +116,10 @@ class Alignment(Setup):
                 self.READ_PAIR_OPTICAL_DUPLICATES = 0
                 self.PERCENT_DUPLICATION = 0.0
         else:
-            print(f"Warning: MarkDuplicates failed or dup_metrics.csv not created. Using sorted BAM file instead.")
+            if platform.long_reads:
+                print(f"Duplicate marking skipped for {platform.name} reads.")
+            else:
+                print(f"Warning: MarkDuplicates failed or dup_metrics.csv not created. Using sorted BAM file instead.")
             # Use sorted BAM file if MarkDuplicates failed
             nodup_bamfile = sorted_bamfile
             # Set default values
@@ -136,7 +147,9 @@ class Alignment(Setup):
                     min_number = chunk
             print("{}:{}-{}".format(chrom, min_number, total_len), file=chrom_ranges)
         chrom_ranges.close()
-        os.system(f'freebayes-parallel chrom_ranges.txt 8 -E -1 -e 1 -u --strict-vcf -f {reference} {nodup_bamfile} > {unfiltered_hapall}')
+        # Long reads: SNPs only, without the -e 1 gap limit (read_platform).
+        freebayes_options = ' '.join(read_platform.freebayes_read_options(platform, ['-E', '-1', '-e', '1', '-u']))
+        os.system(f'freebayes-parallel chrom_ranges.txt 8 {freebayes_options} --strict-vcf -f {reference} {nodup_bamfile} > {unfiltered_hapall}')
         write_fix = open(mapfix_hapall, 'w+')
         with open(unfiltered_hapall, 'r') as unfiltered:
             for line in unfiltered:

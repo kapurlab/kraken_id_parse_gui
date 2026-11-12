@@ -312,14 +312,29 @@
   <tbody>
     <tr><th>Kraken2 database</th><td>{{ report.parameters.kraken_db or "not recorded" }}</td></tr>
     <tr><th>BLAST database</th><td>{{ report.parameters.blast_db or "not recorded" }}</td></tr>
+    {% set asm = report.assembly_provenance %}
+    {% if asm %}
+      <tr><th>Read platform</th><td>{{ asm.read_platform.name }} ({{ asm.read_platform.evidence }})</td></tr>
+      <tr><th>Assembly</th><td>{{ asm.method or asm.assembler }}</td></tr>
+      {% if asm.downsampling %}<tr><th>Downsampling</th><td>{{ asm.downsampling }} (seqkit sample, seed {{ asm.subsample_seed }})</td></tr>{% endif %}
+      {% if asm.trimming %}<tr><th>Read trimming</th><td>{{ asm.trimming }}</td></tr>{% endif %}
+      {% if asm.read_rescue %}<tr><th>Unassembled reads</th><td>{{ asm.read_rescue }}</td></tr>{% endif %}
+      {% if asm.attempts and asm.attempts|length > 1 %}<tr><th>Assembly attempts</th><td>{% for a in asm.attempts %}{{ (a.max_bases / 1e6)|round|int }} Mbp: {{ a.outcome }}{% if not loop.last %}; {% endif %}{% endfor %}</td></tr>{% endif %}
+    {% endif %}
     {% if report.software %}
       {% if report.software.bracken %}<tr><th>Bracken</th><td>{{ report.software.bracken }}</td></tr>{% endif %}
       {% if report.software.blastn %}<tr><th>BLAST</th><td>{{ report.software.blastn }}</td></tr>{% endif %}
+      {% for key, label in [('seqkit', 'seqkit'), ('fastp', 'fastp'), ('spades', 'SPAdes'), ('flye', 'Flye'), ('bwa', 'bwa'), ('minimap2', 'minimap2'), ('samtools', 'samtools'), ('freebayes', 'freebayes')] %}
+        {% if report.software[key] %}<tr><th>{{ label }}</th><td>{{ report.software[key] }}</td></tr>{% endif %}
+      {% endfor %}
       {% if report.software.python %}<tr><th>Python</th><td>{{ report.software.python }}</td></tr>{% endif %}
       {% if report.software.pipeline_git_commit %}<tr><th>Pipeline revision</th><td>{{ report.software.pipeline_git_commit }}</td></tr>{% endif %}
     {% endif %}
     {% if report.environment and report.environment.hostname %}<tr><th>Host</th><td>{{ report.environment.hostname }}</td></tr>{% endif %}
     <tr><th>Run identifier</th><td>{{ report.run_id or "not recorded" }}</td></tr>
+    {% for name, digest in (report.input_sha256 or {}).items() %}{% if digest %}
+      <tr><th>Input {{ name|upper }} SHA-256</th><td class="small">{{ digest }}</td></tr>
+    {% endif %}{% endfor %}
   </tbody>
 </table>
 <p class="small">

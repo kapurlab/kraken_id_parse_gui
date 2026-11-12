@@ -7,6 +7,7 @@ Creates PNG coverage graphs from FASTA reference and FASTQ reads
 __version__ = "2.0.0"
 
 import os
+import read_platform
 import sys
 import re
 import glob
@@ -157,18 +158,20 @@ class CoverageGraphGenerator:
                 if os.path.exists(temp_reference):
                     print(f"  Reference file size: {os.path.getsize(temp_reference)} bytes")
 
-            result = subprocess.run(["bwa", "index", temp_reference],
-                                  capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"BWA index failed:\n  Command: bwa index {temp_reference}\n  Return code: {result.returncode}\n  Stderr: {result.stderr}\n  Stdout: {result.stdout}")
+            # bwa only; minimap2 (nanopore/PacBio, read_platform) indexes on the fly.
+            self.platform = read_platform.detect(self.fastq_r1, self.fastq_r2)
+            if read_platform.needs_bwa_index(self.platform):
+                result = subprocess.run(["bwa", "index", temp_reference],
+                                        capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise RuntimeError(f"BWA index failed:\n  Command: bwa index {temp_reference}\n  Return code: {result.returncode}\n  Stderr: {result.stderr}\n  Stdout: {result.stdout}")
 
             if self.debug:
                 print(f"  BWA index completed successfully")
 
             # Align reads (R2 only when the run is paired-end)
-            bwa_cmd = ["bwa", "mem", "-t", str(self.cpus), temp_reference, self.fastq_r1]
-            if self.fastq_r2:
-                bwa_cmd.append(self.fastq_r2)
+            bwa_cmd = read_platform.map_command(self.platform, temp_reference, self.fastq_r1,
+                                                self.fastq_r2, threads=self.cpus)
             print("Aligning reads to reference...")
             if self.debug:
                 print(f"  Command: {' '.join(bwa_cmd)}")
@@ -316,10 +319,12 @@ class CoverageGraphGenerator:
             print("Calling variants with freebayes...")
             # Same caller/quality gating idea as the main reference-guided step:
             # min mapping quality 30, min base quality 20, spec-compliant output.
+            # Long reads: SNPs only, base quality floor Q10 (read_platform).
+            platform = getattr(self, 'platform', None) or read_platform.detect(self.fastq_r1, self.fastq_r2)
             fb_cmd = [
                 "freebayes", "-f", temp_reference,
-                "-m", "30", "-q", "20", "--strict-vcf",
-                sorted_bam,
+                *read_platform.freebayes_read_options(platform, ["-m", "30", "-q", "20"]),
+                "--strict-vcf", sorted_bam,
             ]
             with open(vcf_file, "w") as out:
                 proc = subprocess.run(fb_cmd, stdout=out, stderr=subprocess.PIPE)

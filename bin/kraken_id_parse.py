@@ -473,6 +473,15 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         print(f'  OK      bracken (optional)')
     else:
         print(f'  SKIP    bracken (optional) — not found; the Bracken abundance chart will be skipped')
+    # Needed only for some reads: fastp trims short reads before SPAdes (without
+    # it SPAdes gets them untrimmed); Flye and minimap2 assemble and map
+    # nanopore/PacBio reads (read_platform.py), which cannot run without them.
+    for tool, needed_for in (('fastp', 'read trimming before SPAdes'),
+                             ('flye', 'nanopore/PacBio assembly'),
+                             ('minimap2', 'nanopore/PacBio read mapping')):
+        path = shutil.which(tool)
+        print(f'  OK      {tool}: {path}' if path else
+              f'  MISSING {tool}  <-- needed for {needed_for} (conda_setup/environment.yml)')
     if missing_tools:
         print(f'\n  WARNING: {len(missing_tools)} tool(s) missing: {", ".join(missing_tools)}')
         print(f'  Pipeline will fail when these are reached.\n')
@@ -1073,6 +1082,27 @@ if __name__ == "__main__": # execute if directly access by the interpreter
 
         logger.debug("Generating assembly statistics...")
         assembler.stats(assembler.FASTA)
+        # The record an audit asks for: which assembler, on what, and how the
+        # reads were prepared (also in <sample>_assembly_provenance.json).
+        summary_log.add_note(f'Assembly: {assembler.method_note}')
+        for note in (assembler.downsample_note, assembler.trim_note, assembler.read_rescue_note):
+            if note:
+                summary_log.add_note(note)
+        if assembler.platform.long_reads:
+            report.add_message(
+                'Long-read analysis',
+                f'{assembler.platform.name} reads ({assembler.platform.evidence}): assembled with '
+                f'Flye and mapped with minimap2. Variant calls are SNPs only; indels are not called '
+                f'from {assembler.platform.name} reads, whose errors are mostly small indels.'
+                + (f' {assembler.read_rescue_note}.' if assembler.read_rescue_note else ''),
+                level='info')
+        if assembler.trim_note:
+            logger.info(assembler.trim_note)
+        if assembler.downsample_note:
+            logger.info(assembler.downsample_note)
+            report.add_message('Reads downsampled for assembly',
+                               f'{assembler.downsample_note}. Mean coverage counts all reads.',
+                               level='info')
 
         if os.path.exists(assembler.FASTA):
             fasta_size = os.path.getsize(assembler.FASTA)
@@ -1080,17 +1110,21 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         summary_log.end_section()
 
     except SPAdesDidNotAssembleFASTA as e:
-        summary_log.log_error(f"SPAdes assembly failed — not enough {args.taxon} reads")
+        # The reason comes from SPAdes' exit code and log (assembly.py); too
+        # few reads and too many (out of memory) used to read the same here.
+        reason = str(e)
+        if getattr(e, 'reason', None) == 'no_contigs':
+            reason += f'; likely not enough {args.taxon} reads'
+        if getattr(locals().get('assembler'), 'method_note', None):
+            summary_log.add_note(f'Assembly: {assembler.method_note}')
+        summary_log.log_error(f"Assembly failed — {reason}")
         summary_log.end_section('FAILED')
-        logger.error("SPAdes assembly failed")
-        logger.error(f"Likely not enough {args.taxon} reads to complete assembly")
-        logger.debug(f"Assembly error details: {e}")
+        logger.error(f"Assembly failed: {reason}")
 
-        print('Assembly failed, Check reads')
+        print(f'Assembly failed: {reason}')
         report.add_message(
             'Assembly failed',
-            f'Assembly failed — check reads. Likely not enough {args.taxon} reads to '
-            'complete assembly. Script terminated.', level='error')
+            f'Assembly failed — {reason}. Script terminated.', level='error')
         # Show what was detected even though assembly could not proceed.
         if 'kraken' in dir() and getattr(kraken, 'report', None):
             render_kraken_overview_table(report, kraken.report)
@@ -1101,7 +1135,7 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         cleanup_artifacts(debug=args.debug, logger=logger)
         write_structured_reports(
             "completed_with_warnings",
-            [f"Assembly did not complete for target taxon: {args.taxon}"],
+            [f"Assembly did not complete for target taxon: {args.taxon} ({reason})"],
         )
         sys.exit(0)
     except Exception as e:
@@ -1120,7 +1154,9 @@ if __name__ == "__main__": # execute if directly access by the interpreter
         # Segmented organisms (Orbivirus, ISAV, ...): SPAdes can fuse segments that
         # share conserved termini into one contig, hiding a segment behind the
         # contig's top hit, so search the unexplained stretch of such contigs too.
-        blast = Blast_Fasta(FASTA=assembler.FASTA, blast_db=args.blast_db,
+        # Long reads: the contigs plus reads no contig explains (assembly.py
+        # unassembled_reads), so segments Flye cannot assemble still get a reference.
+        blast = Blast_Fasta(FASTA=assembler.blast_query or assembler.FASTA, blast_db=args.blast_db,
                             split_chimeras=args.taxon in PROFILES)
         logger.debug("Blast_Fasta object created successfully")
 

@@ -31,6 +31,10 @@ dependencies:
   - blast
   - bwa
   - spades
+  - fastp             # adapter/quality trimming before SPAdes (assembly.py;
+                      # guarded: without it SPAdes gets untrimmed reads)
+  - flye              # nanopore/PacBio assembly (assembly.py, read_platform.py)
+  - minimap2          # nanopore/PacBio read mapping (read_platform.py)
   - bracken
   - picard
   - freebayes

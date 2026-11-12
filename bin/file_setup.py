@@ -418,6 +418,7 @@ class SummaryLog:
         self._versions: Dict[str, str] = {}
         self._sections: list = []  # list of (name, start, end, status)
         self._errors: list = []    # list of (timestamp, message)
+        self._notes: list = []     # list of (timestamp, message): methods and decisions
         self._current_section: Optional[tuple] = None
         self._args = args
         self.git_branch: str = 'unknown'
@@ -439,6 +440,9 @@ class SummaryLog:
         tool_cmds = [
             ('kraken2',    ['kraken2', '--version']),
             ('SPAdes',     ['spades.py', '--version']),
+            ('Flye',       ['flye', '--version']),
+            ('fastp',      ['fastp', '--version']),
+            ('minimap2',   ['minimap2', '--version']),
             ('seqkit',     ['seqkit', 'version']),
             ('BWA',        ['bwa']),
             ('samtools',   ['samtools', '--version']),
@@ -585,6 +589,10 @@ class SummaryLog:
         """Record an error for the summary."""
         self._errors.append((datetime.now().strftime('%H:%M:%S'), message))
 
+    def add_note(self, message: str):
+        """Record a method or decision (assembler, downsampling, trimming) for the summary."""
+        self._notes.append((datetime.now().strftime('%H:%M:%S'), message))
+
     # -- write the summary file -----------------------------------------------
 
     def write(self):
@@ -633,6 +641,15 @@ class SummaryLog:
         h, m = divmod(m, 60)
         lines.append(f'  {"TOTAL":<40} {h:02d}:{m:02d}:{s:02d}')
         lines.append('')
+
+        # Methods and decisions
+        if self._notes:
+            lines.append(sep)
+            lines.append('METHODS AND DECISIONS')
+            lines.append(sep)
+            for ts, msg in self._notes:
+                lines.append(f'  [{ts}] {msg}')
+            lines.append('')
 
         # Errors
         if self._errors:

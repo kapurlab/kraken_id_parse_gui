@@ -3,6 +3,7 @@
 __version__ = "0.0.1"
 
 import os
+import read_platform
 import sys
 import random
 import string
@@ -72,8 +73,10 @@ class Coverage_Graph(Setup):
             
         sample_name = re.sub('[._].*', '', os.path.basename(self.FASTQ_R1))
         
-        # Index reference
-        subprocess.run(["bwa", "index", temp_reference], check=True)
+        # Index reference (bwa only; minimap2 indexes on the fly)
+        platform = read_platform.detect(self.FASTQ_R1, self.FASTQ_R2)
+        if read_platform.needs_bwa_index(platform):
+            subprocess.run(["bwa", "index", temp_reference], check=True)
         
         # Align reads
         sam_file = f"{sample_name}.sam"
@@ -82,9 +85,9 @@ class Coverage_Graph(Setup):
         
         print(f"Aligning reads to reference...")
             
-        bwa_cmd = ["bwa", "mem", "-t", str(self.cpus), temp_reference, self.FASTQ_R1]
-        if self.FASTQ_R2:
-            bwa_cmd.append(self.FASTQ_R2)
+        # bwa mem for short reads, minimap2 for nanopore/PacBio (read_platform).
+        bwa_cmd = read_platform.map_command(platform, temp_reference, self.FASTQ_R1, self.FASTQ_R2,
+                                            threads=self.cpus)
         with open(sam_file, 'w') as sam:
             subprocess.run(bwa_cmd, stdout=sam, check=True)
         

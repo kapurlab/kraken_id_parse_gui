@@ -1,4 +1,5 @@
 import datetime as _dt
+import hashlib
 import json
 import os
 import platform
@@ -56,6 +57,43 @@ def _version(command: Iterable[str]) -> Optional[str]:
     return text[0].strip() if text else None
 
 
+def _bwa_version() -> Optional[str]:
+    """bwa has no --version; its usage text says 'Version: 0.7.x' a few lines down."""
+    if not shutil.which("bwa"):
+        return None
+    try:
+        result = subprocess.run(["bwa"], check=False, capture_output=True, text=True, timeout=8)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in (result.stdout + result.stderr).splitlines():
+        if line.startswith("Version:"):
+            return "bwa " + line.split(":", 1)[1].strip()
+    return None
+
+
+def _sha256(path: Optional[str]) -> Optional[str]:
+    """SHA-256 of an input file, so the record names the exact data analysed."""
+    if not path or not os.path.isfile(path):
+        return None
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _assembly_provenance(output_dir: Path) -> Optional[Dict[str, Any]]:
+    """assembly.py's record of the assembly: read platform, tool versions,
+    every command, each attempt's outcome (<sample>_assembly_provenance.json)."""
+    paths = sorted(output_dir.glob("*_assembly_provenance.json"), key=lambda p: p.stat().st_mtime)
+    if not paths:
+        return None
+    try:
+        return json.loads(paths[-1].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def _git_commit(repo: Path) -> Optional[str]:
     try:
         result = subprocess.run(
@@ -68,7 +106,17 @@ def _git_commit(repo: Path) -> Optional[str]:
     except (OSError, subprocess.TimeoutExpired):
         return None
     commit = result.stdout.strip()
-    return commit or None
+    if not commit:
+        return None
+    # A record must not name a clean revision for code that differs from it.
+    try:
+        changed = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+            check=False, capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        changed = ""
+    return f"{commit} with local changes" if changed else commit
 
 
 def _artifact_kind(path: Path) -> str:
@@ -429,15 +477,25 @@ def build_run_manifest(
         # see orbivirus_beta.py); the report banner and the Results pane read it.
         "beta_notice": beta_notice,
         "inputs": inputs,
+        "input_sha256": {name: _sha256(path) for name, path in inputs.items() if path},
         "parameters": parameters,
+        # Every tool that can touch the reads or the assembly, for the record.
         "software": {
             "pipeline_git_commit": _git_commit(repo_root),
             "python": platform.python_version(),
             "kraken2": _version(["kraken2", "--version"]),
             "bracken": _version(["bracken", "-v"]),
             "blastn": _version(["blastn", "-version"]),
-            "tectonic": _version(["tectonic", "--version"]),
+            "seqkit": _version(["seqkit", "version"]),
+            "fastp": _version(["fastp", "--version"]),
+            "spades": _version(["spades.py", "--version"]),
+            "flye": _version(["flye", "--version"]),
+            "bwa": _bwa_version(),
+            "minimap2": _version(["minimap2", "--version"]),
+            "samtools": _version(["samtools", "--version"]),
+            "freebayes": _version(["freebayes", "--version"]),
         },
+        "assembly_provenance": _assembly_provenance(output_dir),
         "databases": databases,
         "environment": {
             "hostname": platform.node(),

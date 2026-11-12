@@ -60,6 +60,10 @@ class Reference_Guided_Assembly():
 
         df = allel.vcf_to_dataframe(vcf, fields=['variants/CHROM', 'variants/POS', 'variants/QUAL',
                                     'variants/REF', 'variants/ALT', 'variants/AC', 'variants/DP', 'variants/MQ',], alt_number=1)
+        if df is None:
+            # A VCF without records (reads match the reference, full coverage)
+            # reads as None, not an empty table: the consensus is the reference.
+            df = pd.DataFrame(columns=['CHROM', 'POS', 'QUAL', 'REF', 'ALT', 'AC', 'DP', 'MQ'])
         try:  # change AC=1 to ambiguous
             for index, row in df.loc[df['AC'] == 1].iterrows():
                 df.at[index, 'ALT'] = ambiguous_lookup[row['REF'] + row['ALT']]

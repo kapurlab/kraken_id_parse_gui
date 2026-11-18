@@ -4,317 +4,631 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kraken ID Parse report — {{ report.sample_id }}</title>
+  {% set legacy = report.legacy_report or {} %}
+  {% set target = legacy.target or {} %}
+  {% set params = report.parameters or {} %}
+  {% set kraken = summary.kraken or {} %}
+  {% set h = summary.headline %}
+  {% set blast_name = (params.blast_db or "BLAST database").rstrip("/").split("/")[-1] %}
+  {% set kraken_db_name = (params.kraken_db or "").rstrip("/").split("/")[-1] %}
+  {% set target_taxon = summary.taxon %}
+  {% set has_interactive = legacy.coverage_interactive %}
   <style>
-    /* Shared visual language with the rest of the Kapur Lab suite (amr_plus,
-       irma): teal/terra/ink, one flowing document with underlined section
-       headings, label/value tables for facts and grid tables for rows. The
-       report used to imitate a paginated LaTeX document — a date stamp
-       repeated on every "page" and dark blue title bars — which read as a
-       printout of something else rather than as this tool's own output. */
+    /* One document in the suite's palette (teal / terra / ink). The top of the
+       page answers the question — what the sample is, and what needs a
+       person's attention — and the numbered sections below are the evidence.
+       Status colour means status only: green nothing flagged, amber check
+       this, red do not rely on it as is. Prints to letter through WeasyPrint
+       (print media: the @page and @media print rules below). */
     :root {
       --ink: #1F2A2E;
+      --ink-2: #3B4A50;
       --muted: #6E7B82;
       --teal: #4C8C8A;
       --teal-dark: #2F6F6C;
+      --teal-tint: #EEF5F4;
       --terra: #C88F7A;
       --border: #E3DED6;
-      --panel: #FBFAF8;
-      --stripe: #F6F5F2;
-      --danger: #C46A6A;
-      --success: #6BAA75;
-      --warn: #D8B26E;
+      --rule: #EFEBE5;
+      --panel: #FAF9F7;
+      --stripe: #F8F6F3;
+      --ok: #2F7D4F;   --ok-bg: #EAF4EE;   --ok-line: #B9DCC6;
+      --warn: #8A5A0B; --warn-bg: #FCF5E6; --warn-line: #EBCF95; --warn-mark: #D49A2A;
+      --fail: #A63A3A; --fail-bg: #FBEEEE; --fail-line: #E7B8B8;
+      --dom-bacteria: #4C8C8A;
+      --dom-viruses: #C88F7A;
+      --dom-eukaryota: #6F86B0;
+      --dom-archaea: #B89B52;
+      --dom-other: #A3ADB2;
+      --dom-unclassified: #DCD7CF;
     }
     * { box-sizing: border-box; }
+    html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     body {
-      font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;
       color: var(--ink);
-      margin: 0 auto;
-      padding: 24px;
-      max-width: 1100px;
+      margin: 0;
+      background: #EDEFEE;
       font-size: 13px;
-      line-height: 1.45;
+      line-height: 1.5;
+      font-variant-numeric: tabular-nums;
+    }
+    .page {
+      max-width: 1080px;
+      margin: 24px auto;
       background: #fff;
-    }
-    h1 { font-size: 22px; margin: 0 0 2px; }
-    h2 {
-      color: var(--teal);
-      font-size: 15px;
-      margin: 22px 0 6px;
-      border-bottom: 2px solid var(--border);
-      padding-bottom: 3px;
-    }
-    h3 { font-size: 13px; margin: 14px 0 4px; }
-    .sub { color: var(--muted); margin: 0 0 12px; }
-    .banner {
-      background: var(--teal);
-      color: #fff;
-      padding: 10px 14px;
-      border-radius: 6px;
-      font-weight: 600;
-      margin: 6px 0;
-    }
-    .banner.danger { background: var(--danger); }
-    .banner.warn { background: var(--warn); }
-    table { border-collapse: collapse; width: 100%; margin: 4px 0 8px; }
-    table.kv th {
-      text-align: left;
-      width: 34%;
-      background: var(--panel);
-      font-weight: 600;
-    }
-    table.kv th, table.kv td {
-      border-bottom: 1px solid var(--border);
-      padding: 5px 9px;
-      vertical-align: top;
-    }
-    table.grid { font-size: 11.5px; }
-    table.grid th {
-      background: var(--teal);
-      color: #fff;
-      text-align: left;
-      padding: 5px 7px;
-      font-weight: 600;
-    }
-    table.grid td { border-bottom: 1px solid var(--border); padding: 4px 7px; }
-    table.grid tbody tr:nth-child(even) { background: var(--stripe); }
-    td.numeric, th.numeric { text-align: right; }
-    .nowrap { white-space: nowrap; }
-    td.center, th.center { text-align: center; }
-    .muted { color: var(--muted); }
-    .small { color: var(--muted); font-size: 11px; }
-    .scroll { overflow-x: auto; }
-    .figure { margin: 8px 0 10px; }
-    .figure img { max-width: 100%; height: auto; display: block; }
-    .pie { max-width: 460px; }
-    .caption { color: var(--muted); font-size: 11px; margin: 2px 0 12px; }
-    .chips span {
-      display: inline-block;
-      background: #EEF3F2;
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 1px 9px;
-      margin: 2px 3px 0 0;
-      font-size: 11px;
+      overflow: hidden;
+      box-shadow: 0 1px 3px rgba(31, 42, 46, .06);
     }
+    .content { padding: 22px 32px 28px; }
     a { color: var(--teal-dark); }
-    @page { size: letter; margin: 14mm; }
+    code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em; }
+
+    /* ── Masthead ─────────────────────────────────────────── */
+    .masthead { background: var(--teal-dark); color: #fff; padding: 20px 32px 16px; }
+    .masthead .eyebrow { color: #CFE3E1; letter-spacing: .08em; text-transform: uppercase; font-size: 11px; font-weight: 700; }
+    .masthead h1 { font-size: 22px; line-height: 1.25; margin: 2px 0 14px; font-weight: 700; }
+    .meta { display: grid; grid-template-columns: 1.5fr 1fr 1.2fr 1.1fr; margin: 0;
+            border-top: 1px solid rgba(255, 255, 255, .22); padding-top: 11px; }
+    .meta div { padding-right: 14px; }
+    .meta dt { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: #CFE3E1; margin: 0; }
+    .meta dd { margin: 2px 0 0; font-size: 14px; font-weight: 600; word-break: break-word; }
+
+    /* ── Status chips & banners ───────────────────────────── */
+    .chip { display: inline-block; border-radius: 999px; padding: 1px 10px; font-size: 11.5px; font-weight: 700;
+            border: 1px solid transparent; line-height: 1.6; white-space: nowrap; }
+    .chip.ok { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-line); }
+    .chip.warn { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-line); }
+    .chip.fail { background: var(--fail-bg); color: var(--fail); border-color: var(--fail-line); }
+    .beta {
+      margin: 0 0 14px; padding: 11px 16px; border-radius: 8px;
+      background: var(--fail-bg); border: 1px solid var(--fail-line); border-left: 5px solid var(--fail);
+      color: #5E1F1F;
+    }
+    .beta strong { color: var(--fail); display: block; margin-bottom: 2px; }
+
+    /* ── Summary ──────────────────────────────────────────── */
+    .verdict {
+      display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center;
+      border: 1px solid var(--border); border-left: 6px solid var(--ok); border-radius: 8px;
+      padding: 14px 18px; background: var(--panel);
+    }
+    .verdict.lvl-warn { border-left-color: var(--warn-mark); }
+    .verdict.lvl-fail { border-left-color: var(--fail); }
+    .verdict .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 700; }
+    .verdict-title { font-size: 22px; font-weight: 700; line-height: 1.25; margin: 2px 0 3px; }
+    .verdict-detail { color: var(--ink-2); font-size: 13px; }
+    .verdict-state { text-align: right; }
+    .verdict-state .state-text { display: block; font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 0; }
+    .kpis.five { grid-template-columns: repeat(5, 1fr); }
+    .kpi { border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px 10px; background: #fff; }
+    .kpi .k-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; }
+    .kpi .k-value { font-size: 20px; font-weight: 700; line-height: 1.3; }
+    .kpi .k-value small { font-size: 12px; font-weight: 600; color: var(--muted); }
+    .kpi .k-sub { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+    .kpi.flag-warn { border-color: var(--warn-line); background: var(--warn-bg); }
+    .kpi.flag-fail { border-color: var(--fail-line); background: var(--fail-bg); }
+
+    .cols { display: grid; grid-template-columns: 1.25fr 1fr; gap: 12px; margin-top: 12px; }
+    .card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; background: #fff; }
+    .card h3 { margin: 0 0 9px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--teal-dark); }
+
+    .compbar { display: block; width: 100%; height: 14px; border-radius: 3px; margin: 2px 0 6px; }
+    .legend { font-size: 11.5px; color: var(--ink-2); margin: 0 0 10px; }
+    .legend span { display: inline-block; margin: 0 12px 2px 0; white-space: nowrap; }
+    .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+
+    table.taxa { width: 100%; border-collapse: collapse; font-size: 12px; margin: 0; }
+    table.taxa td { padding: 4px 0; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+    table.taxa tr:last-child td { border-bottom: 0; }
+    table.taxa .t-name { padding-right: 8px; }
+    table.taxa .t-name.child { padding-left: 16px; }
+    table.taxa .t-rank { color: var(--muted); font-size: 10.5px; white-space: nowrap; padding-right: 8px; }
+    table.taxa .t-pct { width: 118px; white-space: nowrap; text-align: right; }
+    .meter { display: inline-block; width: 50px; height: 6px; background: var(--rule); border-radius: 3px;
+             vertical-align: middle; margin-right: 7px; overflow: hidden; }
+    .meter b { display: block; height: 6px; background: var(--teal); }
+    .tree { color: var(--muted); }
+
+    ul.attn { list-style: none; margin: 0; padding: 0; }
+    ul.attn li { padding: 7px 0 7px 27px; border-bottom: 1px solid var(--rule); position: relative; font-size: 12.5px; }
+    ul.attn li:last-child { border-bottom: 0; }
+    ul.attn li::before {
+      position: absolute; left: 0; top: 8px; width: 17px; height: 17px; border-radius: 50%;
+      font-size: 11px; font-weight: 800; line-height: 17px; text-align: center; color: #fff;
+    }
+    ul.attn li.warn::before { content: "!"; background: var(--warn-mark); }
+    ul.attn li.fail::before { content: "\00D7"; background: var(--fail); font-size: 14px; }
+    ul.attn li.info::before { content: "i"; background: var(--muted); }
+    ul.attn .a-title { font-weight: 650; display: block; }
+    ul.attn .a-detail { color: var(--ink-2); display: block; font-size: 12px; }
+    .all-clear { color: var(--ok); font-weight: 650; padding: 6px 0 6px 27px; position: relative; }
+    .all-clear::before { content: "\2713"; position: absolute; left: 0; top: 6px; width: 18px; height: 18px; border-radius: 50%;
+                         background: var(--ok); color: #fff; text-align: center; line-height: 18px; font-size: 11px; }
+    .rules { color: var(--muted); font-size: 11px; margin: 8px 0 0; padding-top: 8px; border-top: 1px dashed var(--border); }
+
+    .lede { color: var(--ink-2); margin: 14px 0 0; padding: 10px 14px; background: var(--teal-tint);
+            border-radius: 8px; font-size: 12.5px; }
+
+    /* ── Sections ─────────────────────────────────────────── */
+    h2.sec {
+      font-size: 15px; margin: 30px 0 10px; padding-bottom: 6px; border-bottom: 2px solid var(--border);
+      color: var(--ink); display: flex; align-items: baseline; gap: 10px;
+    }
+    h2.sec .n {
+      display: inline-block; min-width: 22px; height: 22px; border-radius: 6px; background: var(--teal);
+      color: #fff; font-size: 12px; text-align: center; line-height: 22px; font-weight: 700;
+    }
+    h2.sec .s { margin-left: auto; font-size: 11.5px; font-weight: 500; color: var(--muted); }
+    h3.sub { font-size: 12.5px; margin: 16px 0 6px; color: var(--teal-dark); }
+    p { margin: 6px 0; }
+    .small, .caption { color: var(--muted); font-size: 11.5px; }
+    .caption { margin: 4px 0 12px; }
+    .muted { color: var(--muted); }
+    .empty { color: var(--muted); font-style: italic; padding: 4px 0; }
+
+    table { border-collapse: collapse; width: 100%; margin: 4px 0 6px; }
+    table.kv th, table.kv td { border-bottom: 1px solid var(--rule); padding: 6px 10px; vertical-align: top; text-align: left; }
+    table.kv th { width: 30%; font-weight: 600; color: var(--ink-2); background: var(--panel); }
+    table.kv td.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; word-break: break-all; }
+    table.grid { font-size: 12px; }
+    table.grid thead th {
+      background: var(--panel); color: var(--ink-2); text-align: left; padding: 7px 9px; font-weight: 700;
+      font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
+      border-top: 1px solid var(--border); border-bottom: 2px solid var(--border);
+    }
+    table.grid td { border-bottom: 1px solid var(--rule); padding: 6px 9px; vertical-align: top; }
+    table.grid tbody tr:nth-child(even) td { background: var(--stripe); }
+    /* Numeric columns align right in the header as well as the body. */
+    table.grid thead th.num, table.grid td.num { text-align: right; white-space: nowrap; }
+    table.grid thead th.ctr, table.grid td.ctr { text-align: center; }
+    table.grid tr.top td { font-weight: 650; background: var(--teal-tint); }
+    .acc { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; color: var(--ink-2); margin-right: 4px; }
+    .lvl { white-space: nowrap; }
+    .lvl small { color: var(--muted); font-size: 10px; margin-left: 4px; }
+    .share { display: inline-block; width: 64px; height: 7px; background: var(--rule); border-radius: 3px; vertical-align: middle; margin-left: 8px; overflow: hidden; }
+    .share b { display: block; height: 7px; background: var(--teal); }
+
+    .bins { width: 100%; border-collapse: separate; border-spacing: 6px 0; margin: 0 -6px; }
+    .bins td { border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; background: #fff; width: 33%; }
+    .bins b { font-size: 15px; display: block; }
+    .bins span { font-size: 11px; color: var(--muted); }
+
+    .figure { margin: 8px 0 6px; }
+    .figure img { max-width: 100%; height: auto; display: block; border: 1px solid var(--rule); border-radius: 6px; }
+    .pie { max-width: 440px; }
+    .coverage-interactive { border: 1px solid var(--rule); border-radius: 8px; padding: 6px; overflow-x: auto; }
+    .print-only { display: none; }
+
+    .disclaimer { margin-top: 26px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px;
+                  background: var(--panel); color: var(--ink-2); font-size: 11.5px; }
+    .foot { color: var(--muted); font-size: 11px; text-align: center; padding: 14px 0 0; }
+
+    @media (max-width: 760px) {
+      .content, .masthead { padding-left: 16px; padding-right: 16px; }
+      .meta { grid-template-columns: 1fr 1fr; row-gap: 10px; }
+      .kpis { grid-template-columns: 1fr 1fr; }
+      .cols { grid-template-columns: 1fr; }
+      .verdict { grid-template-columns: 1fr; }
+      .verdict-state { text-align: left; }
+      .page { margin: 0; border-radius: 0; border-left: 0; border-right: 0; }
+      table.grid { display: block; overflow-x: auto; }
+    }
+
+    /* ── Print (WeasyPrint renders report.pdf with print media) ─── */
+    @page {
+      size: letter;
+      margin: 16mm 13mm 15mm;
+      @top-left { content: "Kraken ID Parse \00B7  {{ report.sample_id|css_str|safe }}"; font-size: 7.5pt; color: #6E7B82; }
+      @top-right { content: "{{ (beta_page or report.report_date or '')|css_str|safe }}"; font-size: 7.5pt; color: {{ '#A63A3A' if beta_page else '#6E7B82' }}; }
+      @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 7.5pt; color: #6E7B82; }
+    }
     @media print {
-      body { padding: 0; font-size: 11px; max-width: none; }
-      h2 { break-after: avoid; }
-      table, .figure { break-inside: avoid; }
-      .no-print { display: none; }
+      body { background: #fff; font-size: 10px; }
+      .page { margin: 0; border: 0; border-radius: 0; max-width: none; box-shadow: none; overflow: visible; }
+      .content { padding: 12px 0 0; }
+      .masthead { padding: 13px 18px 11px; border-radius: 6px; }
+      .masthead h1 { font-size: 17px; margin-bottom: 9px; }
+      .meta dd { font-size: 11.5px; }
+      .verdict-title { font-size: 17px; }
+      .kpis { gap: 6px; }
+      .kpi { padding: 6px 8px 7px; }
+      .kpi .k-label { font-size: 7.5px; letter-spacing: .03em; }
+      .kpi .k-value { font-size: 14px; }
+      .kpi .k-sub { font-size: 8.5px; }
+      .card, ul.attn li, table.grid, table.taxa { font-size: 9.5px; }
+      h2.sec { margin-top: 18px; font-size: 13px; break-after: avoid; page-break-after: avoid; }
+      h3.sub { break-after: avoid; page-break-after: avoid; }
+      .summary, .verdict, .kpis, .card, table.kv, .figure, .bins, .disclaimer, .lede { break-inside: avoid; page-break-inside: avoid; }
+      tr { break-inside: avoid; page-break-inside: avoid; }
+      thead { display: table-header-group; }
+      .no-print { display: none !important; }
+      .print-only { display: block; }
       /* Plotly cannot render in a print engine; the static coverage figures
-         below carry the same information into the PDF. */
+         carry the same information into the PDF. */
       .coverage-interactive { display: none; }
     }
   </style>
 </head>
 <body>
-{% set legacy = report.legacy_report %}
-{% set blast_name = (report.parameters.blast_db or "BLAST database").split("/")[-1] %}
-{% set target_taxon = legacy.target.taxon or report.parameters.taxon %}
+{% set ns = namespace(n=0) %}
+{% macro sec(title, sub="") %}{% set ns.n = ns.n + 1 %}<h2 class="sec"><span class="n">{{ ns.n }}</span>{{ title }}{% if sub %}<span class="s">{{ sub }}</span>{% endif %}</h2>{% endmacro %}
+{% set dom_hex = {"Bacteria": "#4C8C8A", "Viruses": "#C88F7A", "Eukaryota": "#6F86B0", "Archaea": "#B89B52", "Unclassified": "#DCD7CF"} %}
+{% set krona = (legacy.krona or [])|sort(attribute="name")|last if legacy.krona else None %}
+{% set input_names = [] %}
+{% for k, v in (report.inputs or {}).items() %}{% if v %}{% set _ = input_names.append(v.split("/")[-1]) %}{% endif %}{% endfor %}
+{% set parsed_reads = [] %}
+{% for a in report.artifacts or [] %}{% if a.name.endswith(".fastq.gz") and "/" not in a.path and a.name not in input_names %}{% set _ = parsed_reads.append(a) %}{% endif %}{% endfor %}
 
-<h1>Kraken ID Parse — read classification &amp; identification report</h1>
-<p class="sub">
-  Sample <b>{{ report.sample_id }}</b> &middot; {{ report.report_date }}
-  {%- if report.software and report.software.pipeline_git_commit %} &middot; pipeline {{ report.software.pipeline_git_commit }}{% endif %}
-</p>
+<div class="page">
+<header class="masthead">
+  <div class="eyebrow">Kraken ID Parse</div>
+  <h1>Read classification &amp; identification report</h1>
+  <dl class="meta">
+    <div><dt>Sample</dt><dd>{{ report.sample_id }}</dd></div>
+    <div><dt>Report date</dt><dd>{{ report.report_date or "not recorded" }}</dd></div>
+    <div><dt>Run mode</dt><dd>{{ summary.mode_label }}</dd></div>
+    <div><dt>Run status</dt><dd><span class="chip {{ summary.status_level }}">{{ summary.status_label }}</span></dd></div>
+  </dl>
+</header>
 
-{% if report.status and report.status != "completed" %}
-  <div class="banner warn">Run status: {{ report.status.replace("_", " ") }} — see the warnings at the end of this report.</div>
-{% endif %}
+<div class="content">
 
 {% if beta_notice %}
-  <div class="banner danger" role="alert">{{ beta_notice.title }}. {{ beta_notice.text }}</div>
+  <div class="beta" role="alert"><strong>{{ beta_notice.title }}</strong>{{ beta_notice.text }}</div>
 {% endif %}
 
-<div class="banner">
-  {%- if target_taxon %}Target taxon: {{ target_taxon }}{% else %}Taxonomic classification{% endif %}
-  {%- if legacy.target.extraction_rate %} &middot; {{ legacy.target.extraction_rate|fmt(2, "%") }} of reads extracted{% endif %}
-  {%- if legacy.assembly.contig_count %} &middot; {{ legacy.assembly.contig_count }} contigs assembled{% endif %}
-</div>
+<section class="summary" aria-label="Summary">
+  <div class="verdict lvl-{{ summary.level }}">
+    <div>
+      <div class="eyebrow">{{ h.eyebrow }}</div>
+      <div class="verdict-title">{{ h.title }}</div>
+      {% if h.detail %}<div class="verdict-detail">{{ h.detail }}</div>{% endif %}
+    </div>
+    <div class="verdict-state">
+      {% set n_att = summary.attention|length %}
+      {% if summary.level == "ok" %}
+        <span class="chip ok">No issues flagged</span>
+        <span class="state-text">Checked against the rules listed below</span>
+      {% elif summary.level == "warn" %}
+        <span class="chip warn">{{ n_att }} item{{ "s" if n_att != 1 }} to check</span>
+        <span class="state-text">See Needs attention below</span>
+      {% else %}
+        <span class="chip fail">Review before use</span>
+        <span class="state-text">See Needs attention below</span>
+      {% endif %}
+    </div>
+  </div>
 
-<h2>What this report shows</h2>
-<p>
-  Every read in this sample was classified against a Kraken2 database to identify what
-  organisms are present and to screen for contamination.
-  {%- if target_taxon %}
-  Reads assigned to <b>{{ target_taxon }}</b> were then extracted
-  {%- if legacy.target.extracted_reads %} ({{ legacy.target.extracted_reads|fmt }} of
-  {{ legacy.target.total_input_reads|fmt }} reads){% endif %}
-  {%- if legacy.assembly.contig_count %}, assembled, and the assembly identified by BLAST
-  against {{ blast_name }}{% endif %}.
-  {%- endif %}
-  Each section below reports one step, with the numbers it produced.
-</p>
+  <div class="kpis{% if summary.mode == "full" %} five{% endif %}">
+    <div class="kpi">
+      <div class="k-label">Input reads</div>
+      <div class="k-value">{{ summary.total_reads|fmt if summary.total_reads is not none else "—" }}</div>
+      <div class="k-sub">{{ input_names|length }} FASTQ file{{ "s" if input_names|length != 1 }}{% if input_names|length == 2 %} · paired{% endif %}</div>
+    </div>
+    <div class="kpi{% if kraken.unclassified_pct is not none and kraken.unclassified_pct >= 50 %} flag-warn{% endif %}">
+      <div class="k-label">Classified by Kraken2</div>
+      <div class="k-value">{{ kraken.classified_pct|fmt(1, "%") if kraken.classified_pct is not none else "—" }}</div>
+      <div class="k-sub">{{ kraken_db_name or "database not recorded" }}</div>
+    </div>
+    {% if summary.mode == "kraken_only" %}
+      {% set t0 = (kraken.top_taxa or [None])[0] %}
+      <div class="kpi">
+        <div class="k-label">Most abundant taxon</div>
+        <div class="k-value">{{ t0.pct|fmt(2, "%") if t0 else "—" }}</div>
+        <div class="k-sub">{{ t0.name if t0 else "no classification" }}</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">Assembly &amp; BLAST</div>
+        <div class="k-value">—</div>
+        <div class="k-sub">not part of this run mode</div>
+      </div>
+    {% else %}
+      <div class="kpi{% if summary.extracted is not none and summary.extracted < 100 %} flag-fail{% elif summary.extraction_rate is not none and summary.extraction_rate < 1 %} flag-warn{% endif %}">
+        <div class="k-label">Target reads</div>
+        <div class="k-value">{{ summary.extracted|fmt if summary.extracted is not none else "none" }}</div>
+        <div class="k-sub">{{ (summary.extraction_rate|fmt(2, "%") ~ " of the sample") if summary.extraction_rate is not none else (target_taxon or "no target") }}</div>
+      </div>
+      {% if summary.mode == "full" %}
+        {% set cov = summary.coverage %}
+        <div class="kpi{% if cov and cov.percent_covered is not none and cov.percent_covered < 90 %} flag-warn{% endif %}">
+          <div class="k-label">Reference covered</div>
+          <div class="k-value">{{ cov.percent_covered|fmt(1, "%") if cov else "—" }}</div>
+          <div class="k-sub">{{ ("mean depth " ~ cov.mean_coverage|fmt(1, "X")) if cov else "no coverage recorded" }}</div>
+        </div>
+        <div class="kpi">
+          <div class="k-label">Assembly</div>
+          <div class="k-value">{{ legacy.assembly.contig_count|fmt if legacy.assembly and legacy.assembly.contig_count else "—" }} <small>contigs</small></div>
+          <div class="k-sub">{% if legacy.assembly and legacy.assembly.n50 %}N50 {{ legacy.assembly.n50|fmt }} bp{% else %}not assembled{% endif %}</div>
+        </div>
+      {% else %}
+        <div class="kpi">
+          <div class="k-label">Parsed read files</div>
+          <div class="k-value">{{ parsed_reads|length }}</div>
+          <div class="k-sub">FASTQ.gz of the target, ready for vSNP</div>
+        </div>
+      {% endif %}
+    {% endif %}
+  </div>
 
-<h2>Input file quality</h2>
-<p class="small">
-  Read statistics per FASTQ file. Q30 is the percentage of bases at or above Phred quality
-  30 (a 1-in-1000 error rate); higher is better.
-</p>
-<div class="scroll">
+  <div class="cols">
+    <div class="card">
+      <h3>What is in the sample</h3>
+      {% if kraken.domains %}
+        {% set acc = namespace(x=0) %}
+        <svg class="compbar" viewBox="0 0 100 4" preserveAspectRatio="none" role="img" aria-label="Share of reads by domain">
+          {% for d in kraken.domains if d.pct > 0 %}
+            <rect x="{{ '%.3f'|format(acc.x) }}" y="0" width="{{ '%.3f'|format(d.pct) }}" height="4" fill="{{ dom_hex.get(d.name, '#A3ADB2') }}"/>
+            {% set acc.x = acc.x + d.pct %}
+          {% endfor %}
+        </svg>
+        <div class="legend">
+          {% for d in kraken.domains if d.pct >= 0.01 %}
+            <span><i style="background: {{ dom_hex.get(d.name, '#A3ADB2') }}"></i>{{ d.name }} {{ d.pct|fmt(2, "%") }}</span>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if kraken.top_taxa %}
+        <table class="taxa">
+          <tbody>
+          {% for t in kraken.top_taxa[:6] %}
+            <tr>
+              <td class="t-name{% if t.parent %} child{% endif %}">{% if t.parent %}<span class="tree">└ </span>{% endif %}{{ t.name }}</td>
+              <td class="t-rank">{{ t.rank_label }}</td>
+              <td class="t-pct"><span class="meter"><b style="width: {{ '%.1f'|format([t.pct, 100]|min) }}%"></b></span>{{ "<0.01%" if t.pct < 0.005 else t.pct|fmt(2, "%") }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="empty">No Kraken report was found for this run.</p>
+      {% endif %}
+    </div>
+    <div class="card">
+      <h3>Needs attention</h3>
+      {% if summary.attention %}
+        <ul class="attn">
+          {% for a in summary.attention %}
+            <li class="{{ a.level }}"><span class="a-title">{{ a.title }}</span>{% if a.detail %}<span class="a-detail">{{ a.detail }}</span>{% endif %}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="all-clear">Nothing flagged</div>
+      {% endif %}
+      <p class="rules">
+        Flagged when: the run did not complete cleanly or logged a warning; under 10,000 input reads; a read
+        file under 75% of bases at Q30; half the reads or more unclassified{% if summary.mode != "kraken_only" %};
+        under 100 target reads, or under 1% of the sample on target{% endif %}{% if summary.mode == "full" %};
+        no BLAST call, or the top match under half the assembled bases; a reference under 90% covered or 10X deep{% endif %}.
+      </p>
+    </div>
+  </div>
+
+  <p class="lede">
+    {% if summary.mode == "kraken_only" %}
+      Every read was classified against the Kraken2 database <b>{{ kraken_db_name or "not recorded" }}</b> to show
+      which organisms are present and to screen for contamination. This run stopped there: no target taxon was
+      extracted, assembled or identified.
+    {% else %}
+      Every read was classified against the Kraken2 database <b>{{ kraken_db_name or "not recorded" }}</b>, and the
+      reads assigned to <b>{{ target_taxon }}</b> were extracted{% if summary.extracted is not none and summary.total_reads %}
+      ({{ summary.extracted|fmt }} of {{ summary.total_reads|fmt }}){% endif %}{% if summary.mode == "full" %}, assembled,
+      and the assembly identified by BLAST against <b>{{ blast_name }}</b>{% else %} and kept as FASTQ files; this run
+      mode does not assemble or BLAST them{% endif %}. Each numbered section below is the evidence for one step.
+    {% endif %}
+  </p>
+</section>
+
+{# ── Input reads ─────────────────────────────────────────────── #}
+{{ sec("Input read quality", "per FASTQ file") }}
+{% set fq = (legacy.fastq or [])|selectattr("filename")|list %}
+{% if fq %}
   <table class="grid">
     <thead>
-      <tr>
-        <th>File</th><th class="numeric">Size</th><th class="numeric">Q30 passing</th>
-        <th class="numeric">Mean read score</th><th class="numeric">Average read length</th>
-      </tr>
+      <tr><th>File</th><th class="num">Size</th><th class="num">Reads</th><th class="num">Bases &ge; Q30</th><th class="num">Mean quality</th><th class="num">Mean length</th></tr>
     </thead>
     <tbody>
-      {% for row in legacy.fastq if row.filename %}
+      {% for row in fq %}
       <tr>
-        <td>{{ row.filename }}</td>
-        <td class="numeric">{{ row.file_size }}</td>
-        <td class="numeric">{{ row.q30 }}</td>
-        <td class="numeric">{{ row.mean_score|fmt(1) }}</td>
-        <td class="numeric">{{ row.avg_length|fmt(1) }}</td>
+        <td>{% if row.read %}<b>{{ row.read }}</b> &nbsp;{% endif %}{{ row.filename }}</td>
+        <td class="num">{{ row.file_size or "—" }}</td>
+        <td class="num">{{ row.read_count|fmt if row.read_count else "—" }}</td>
+        <td class="num">{{ row.q30 or "—" }}</td>
+        <td class="num">{{ row.mean_score|fmt(1) if row.mean_score else "—" }}</td>
+        <td class="num">{{ (row.avg_length|fmt(1) ~ " bp") if row.avg_length else "—" }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
-</div>
-
-{% if report.artifacts | selectattr("name", "equalto", "bracken_pie.png") | list %}
-  <h2>Read identification</h2>
-  <div class="figure">
-    <img class="pie" src="{{ asset_url("bracken_pie.png") }}" alt="FASTQ read identification pie chart">
-  </div>
-  <p class="caption">
-    Share of reads assigned to each organism, from
-    <a href="https://ccb.jhu.edu/software/kraken2/">Kraken2</a> classification re-estimated by
-    <a href="https://ccb.jhu.edu/software/bracken/">Bracken</a>.
-  </p>
+  <p class="caption">Q30 is the share of bases at or above Phred quality 30 (one error in 1,000); higher is better. Mean quality is the average Phred score per read.</p>
+{% else %}
+  {% if input_names %}
+    <table class="kv"><tbody>{% for name in input_names %}<tr><th>Input file {{ loop.index }}</th><td>{{ name }}</td></tr>{% endfor %}</tbody></table>
+  {% endif %}
+  <p class="empty">Read quality statistics are not recorded for this run mode.</p>
 {% endif %}
 
-<h2>Kraken classification</h2>
+{# ── Kraken classification ───────────────────────────────────── #}
+{{ sec("Kraken classification", "what is in the sample") }}
 <table class="kv">
   <tbody>
-    <tr><th>Target taxon</th><td>{{ target_taxon or "not recorded" }}</td></tr>
-    <tr><th>Taxon ID</th><td>{{ legacy.target.taxon_id or "not recorded" }}</td></tr>
-    <tr><th>Total input reads</th><td>{{ legacy.target.total_input_reads|fmt }}</td></tr>
-    <tr><th>Extracted reads</th><td>{{ legacy.target.extracted_reads|fmt }}</td></tr>
-    <tr><th>Extraction rate</th><td>{{ legacy.target.extraction_rate|fmt(2, "%") }}</td></tr>
-    <tr><th>Kraken2 database</th><td>{{ (report.parameters.kraken_db or "not recorded").split("/")[-1] }}</td></tr>
+    <tr><th>Kraken2 database</th><td>{{ kraken_db_name or "not recorded" }}</td></tr>
+    <tr><th>Reads classified</th><td>{{ kraken.classified_pct|fmt(2, "%") if kraken.classified_pct is not none else "not recorded" }}{% if kraken.total_reads %} of {{ kraken.total_reads|fmt }} {{ "read pairs" if input_names|length == 2 else "reads" }}{% endif %}</td></tr>
+    <tr><th>Reads unclassified</th><td>{{ kraken.unclassified_pct|fmt(2, "%") if kraken.unclassified_pct is not none else "not recorded" }}</td></tr>
+    {% if krona %}
+      <tr><th>Interactive taxonomy</th><td><a href="{{ file_url(krona.path) }}" target="_blank" rel="noopener">Open the Krona chart</a> <span class="small">&nbsp;{{ krona.path }}</span></td></tr>
+    {% endif %}
   </tbody>
 </table>
+{% if kraken.top_taxa %}
+  <h3 class="sub">Most abundant taxa</h3>
+  <table class="grid">
+    <thead><tr><th>Taxon</th><th>Level</th><th class="num">Taxon ID</th><th class="num">Reads</th><th class="num">Share of reads</th></tr></thead>
+    <tbody>
+      {% for t in kraken.top_taxa %}
+        <tr>
+          <td>{% if t.parent %}<span class="tree">&nbsp;&nbsp;└ </span>{% endif %}{{ t.name }}</td>
+          <td class="lvl">{{ t.rank_label }}<small>{{ t.rank }}</small></td>
+          <td class="num">{{ t.taxid }}</td>
+          <td class="num">{{ t.reads|fmt }}</td>
+          <td class="num">{{ "<0.01%" if t.pct < 0.005 else t.pct|fmt(2, "%") }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="caption">Species and species groups (complexes), ordered by reads. A group's count includes the reads of the species indented beneath it.</p>
+{% endif %}
+{% if report.artifacts | selectattr("name", "equalto", "bracken_pie.png") | list %}
+  <h3 class="sub">Abundance estimate</h3>
+  <div class="figure"><img class="pie" src="{{ asset_url("bracken_pie.png") }}" alt="Read identification pie chart"></div>
+  <p class="caption">Share of reads per organism, from <a href="https://ccb.jhu.edu/software/kraken2/">Kraken2</a> classification re-estimated by <a href="https://ccb.jhu.edu/software/bracken/">Bracken</a>.</p>
+{% endif %}
 
-{% if legacy.target_taxonomy %}
-  <h2>Detailed classification</h2>
-  <div class="scroll">
+{# ── Target taxon ────────────────────────────────────────────── #}
+{% if summary.mode != "kraken_only" %}
+  {{ sec("Target taxon reads", target_taxon or "") }}
+  <table class="kv">
+    <tbody>
+      <tr><th>Target taxon</th><td>{{ target_taxon or "not recorded" }}</td></tr>
+      <tr><th>Taxon ID</th><td>{{ target.taxon_id or "not recorded" }}</td></tr>
+      <tr><th>Total input reads</th><td>{{ target.total_input_reads|fmt }}</td></tr>
+      <tr><th>Reads extracted</th><td>{{ summary.extracted|fmt if summary.extracted is not none else (target.extracted_reads or "not recorded") }}</td></tr>
+      <tr><th>Extraction rate</th><td>{{ target.extraction_rate|fmt(2, "%") }}</td></tr>
+      {% if parsed_reads %}
+        <tr><th>Parsed read files</th><td>{% for a in parsed_reads %}{{ a.name }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+  {% if legacy.target_taxonomy %}
+    <h3 class="sub">Target lineage</h3>
     <table class="grid">
-      <thead>
-        <tr><th>Taxonomic name</th><th class="center">Level</th><th class="numeric">Reads</th><th class="numeric">Percent</th></tr>
-      </thead>
+      <thead><tr><th>Taxonomic name</th><th>Level</th><th class="num">Reads</th><th class="num">Share of reads</th></tr></thead>
       <tbody>
       {% for row in legacy.target_taxonomy %}
         <tr>
           <td>{{ row.name }}</td>
-          <td class="center">{{ row.level }}</td>
-          <td class="numeric">{{ row.reads|fmt }}</td>
-          <td class="numeric">{{ row.percent|fmt(2) }}</td>
+          <td class="lvl">{{ row.level|rank }}<small>{{ row.level }}</small></td>
+          <td class="num">{{ row.reads|fmt }}</td>
+          <td class="num">{{ row.percent|fmt(2, "%") }}</td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
-  </div>
-  <p class="caption">Reads assigned at each rank in the target lineage. Level codes follow Kraken2: G genus, S species, and numbered sub-ranks below them.</p>
-{% endif %}
-
-{% if legacy.assembly.contig_count or legacy.assembly.total_length %}
-  <h2>Assembly</h2>
-  <table class="kv">
-    <tbody>
-      <tr><th>Contig count</th><td>{{ legacy.assembly.contig_count or "not recorded" }}</td></tr>
-      <tr><th>Contig length counts (&lt;300 | 301–999 | &gt;999 bp)</th><td>{{ legacy.assembly.contig_bins or "not recorded" }}</td></tr>
-      <tr><th>Longest contig</th><td>{{ legacy.assembly.longest_contig|fmt }} bp</td></tr>
-      <tr><th>Total length</th><td>{{ legacy.assembly.total_length|fmt }} bp</td></tr>
-      <tr><th>N50</th><td>{{ legacy.assembly.n50|fmt }}</td></tr>
-      <tr><th>Mean coverage (from FASTQ)</th><td>{{ legacy.assembly.mean_coverage or "not recorded" }}</td></tr>
-    </tbody>
-  </table>
-  <p class="caption">N50 is the contig length at which half the assembly sits in contigs that long or longer — a standard summary of assembly contiguity.</p>
-{% endif %}
-
-<h2>Assembly identification — BLAST against {{ blast_name }}</h2>
-{% if legacy.blast_rows %}
-  <div class="scroll">
-    <table class="grid">
-      <thead><tr><th class="numeric nowrap">Bases (nt)</th><th class="numeric nowrap">Contigs</th><th>Best-matching subject</th></tr></thead>
-      <tbody>
-      {# Strongest match FIRST. The summary file is written weakest-to-strongest
-         (the pipeline reads its LAST line to pick the reference), so printing it
-         in file order buries the identification at the bottom of the table. #}
-      {% for row in legacy.blast_rows|reverse %}
-        <tr>
-          <td class="numeric">{{ row.nt_base_count|fmt }}</td>
-          <td class="numeric">{{ row.contigs }}</td>
-          <td>{{ row.description }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  <p class="caption">
-    Assembled contigs grouped by the reference they matched best, strongest first: the top row
-    carries the most assembled sequence and is the identification this run supports.
-  </p>
-{% else %}
-  <p class="muted">No BLAST summary rows were found for this run.</p>
-{% endif %}
-
-{% if legacy.coverage_interactive %}
-  <h2>Coverage &amp; variants</h2>
-  <p class="small">
-    Per-position read depth for each reference, with a diamond at every variant position and,
-    beneath each diamond, a stem coloured by the nucleotides actually observed there in
-    proportion (A green, C blue, G yellow, T red) — so a 50/50 G/A call is a stem that is half
-    yellow, half green. Shaded red spans have no coverage; the dashed line is 100X.
-    <span class="no-print">Drag to zoom into any region; double-click resets.</span>
-  </p>
-  <div class="coverage-interactive">{{ legacy.coverage_interactive|safe }}</div>
-{% endif %}
-
-{% for figure in legacy.coverage_figures %}
-  {% if loop.first %}<h2>Coverage analysis</h2>{% endif %}
-  {% if figure.preview_path %}
-    <div class="figure">
-      <img src="{{ asset_url(figure.preview_path) }}" alt="Coverage depth analysis">
-    </div>
-    <p class="caption">Figure {{ loop.index }}: read depth across the reference sequences the assembly was compared against.</p>
-  {% else %}
-    <p class="muted">Coverage graph: {{ figure.path }}</p>
+    <p class="caption">Reads Kraken assigned at each rank of the target's lineage. A species group (Kraken's G1) sits between genus and species.</p>
   {% endif %}
-  {% if loop.last and legacy.coverage_stats %}
-    <div class="scroll">
+{% endif %}
+
+{% if summary.mode == "full" %}
+  {# ── Assembly ──────────────────────────────────────────────── #}
+  {% set asm_stats = legacy.assembly or {} %}
+  {{ sec("De novo assembly", "contigs from the target's reads") }}
+  {% if asm_stats.contig_count or asm_stats.total_length %}
+    {% set bins = (asm_stats.contig_bins or "")|string %}
+    {% set parts = bins.split("|") %}
+    <table class="kv">
+      <tbody>
+        <tr><th>Contigs</th><td>{{ asm_stats.contig_count|fmt }}</td></tr>
+        <tr><th>Total length</th><td>{{ asm_stats.total_length|fmt }} bp</td></tr>
+        <tr><th>Longest contig</th><td>{{ asm_stats.longest_contig|fmt }} bp</td></tr>
+        <tr><th>N50</th><td>{{ asm_stats.n50|fmt }} bp</td></tr>
+        <tr><th>Mean read depth (from FASTQ)</th><td>{{ asm_stats.mean_coverage or "not recorded" }}</td></tr>
+        <tr><th>Contigs by length</th><td>
+          {% if parts|length == 3 %}
+            <table class="bins"><tr>
+              <td><b>{{ parts[0]|fmt }}</b><span>300 bp or shorter</span></td>
+              <td><b>{{ parts[1]|fmt }}</b><span>301 – 999 bp</span></td>
+              <td><b>{{ parts[2]|fmt }}</b><span>1,000 bp or longer</span></td>
+            </tr></table>
+          {% else %}{{ bins or "not recorded" }}{% endif %}
+        </td></tr>
+      </tbody>
+    </table>
+    <p class="caption">N50: half of the assembly is in contigs at least this long — a standard measure of how contiguous it is.</p>
+  {% else %}
+    <p class="empty">No assembly was produced for this run.</p>
+  {% endif %}
+
+  {# ── BLAST ─────────────────────────────────────────────────── #}
+  {{ sec("Assembly identification", "BLAST against " ~ blast_name) }}
+  {% if summary.blast %}
+    <table class="grid">
+      <thead><tr><th class="ctr">#</th><th>Best-matching subject</th><th class="num">Bases (nt)</th><th class="num">Share of assembly</th><th class="num">Contigs</th></tr></thead>
+      <tbody>
+      {% for row in summary.blast %}
+        <tr{% if loop.first %} class="top"{% endif %}>
+          <td class="ctr">{{ loop.index }}</td>
+          <td>{% if row.accession %}<span class="acc">{{ row.accession }}</span>{{ row.subject }}{% else %}{{ row.description }}{% endif %}</td>
+          <td class="num">{{ row.bases|fmt if row.bases is not none else row.nt_base_count }}</td>
+          <td class="num">{% if row.share_pct is not none %}{{ "<0.1%" if row.share_pct < 0.05 else row.share_pct|fmt(1, "%") }}<span class="share"><b style="width: {{ '%.1f'|format(row.share_pct) }}%"></b></span>{% else %}—{% endif %}</td>
+          <td class="num">{{ row.contigs }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="caption">Assembled contigs grouped by the reference each matched best, strongest first. The top row carries the most assembled sequence and is the identification this run supports.</p>
+  {% else %}
+    <p class="empty">No BLAST summary rows were found for this run.</p>
+  {% endif %}
+
+  {# ── Coverage ──────────────────────────────────────────────── #}
+  {% if has_interactive or legacy.coverage_figures or legacy.coverage_stats %}
+    {{ sec("Coverage & variants", "reads mapped back to the best reference") }}
+    {% if legacy.coverage_stats %}
       <table class="grid">
-        <thead>
-          <tr><th>Reference</th><th class="numeric">Length</th><th class="numeric">Mean coverage</th><th class="numeric">Genome covered</th></tr>
-        </thead>
+        <thead><tr><th>Reference</th><th class="num">Length</th><th class="num">Mean depth</th><th class="num">Reference covered</th></tr></thead>
         <tbody>
         {% for row in legacy.coverage_stats %}
           <tr>
-            <td>{{ row.header }}</td>
-            <td class="numeric">{{ row.length|fmt }}</td>
-            <td class="numeric">{{ row.mean_coverage|fmt(1, "X") }}</td>
-            <td class="numeric">{{ row.percent_covered|fmt(1, "%") }}</td>
+            <td>{{ row.header or row.reference }}</td>
+            <td class="num">{{ row.length|fmt }} bp</td>
+            <td class="num">{{ row.mean_coverage|fmt(1, "X") }}</td>
+            <td class="num">{{ row.percent_covered|fmt(1, "%") }}</td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
-    </div>
-    <p class="caption">Alignment statistics for each reference sequence.</p>
+    {% endif %}
+    {% if has_interactive %}
+      <p class="small">
+        Read depth along each reference. A diamond marks every variant position; the stem under it is coloured by
+        the nucleotides observed there, in proportion (A green, C blue, G yellow, T red), so a 50/50 G/A call is half
+        yellow, half green. Shaded red spans have no coverage; the dashed line is 100X.
+        <span class="no-print">Drag to zoom into a region; double-click to reset.</span>
+      </p>
+      <div class="coverage-interactive">{{ legacy.coverage_interactive|safe }}</div>
+    {% endif %}
+    {% if legacy.coverage_figures %}
+      {# The static graphs are the PDF's copy of the interactive chart. On
+         screen they only repeat it (with empty "No Coverage Data Above 100X"
+         panels), so they print but do not show when the chart is there. #}
+      <div class="{{ 'print-only coverage-static' if has_interactive else 'coverage-static' }}">
+      {% for figure in legacy.coverage_figures %}
+        {% if figure.preview_path %}
+          <div class="figure"><img src="{{ asset_url(figure.preview_path) }}" alt="Coverage depth along the reference"></div>
+          <p class="caption">Figure {{ loop.index }}: read depth across the reference sequence{{ "s" if legacy.coverage_stats|length > 1 }} the consensus was built against.</p>
+        {% else %}
+          <p class="muted">Coverage graph: {{ figure.path }}</p>
+        {% endif %}
+      {% endfor %}
+      </div>
+    {% endif %}
   {% endif %}
-{% endfor %}
+{% endif %}
 
-<h2>Methods &amp; provenance</h2>
+{# ── Methods & provenance ────────────────────────────────────── #}
+{{ sec("Methods & provenance") }}
 <table class="kv">
   <tbody>
-    <tr><th>Kraken2 database</th><td>{{ report.parameters.kraken_db or "not recorded" }}</td></tr>
-    <tr><th>BLAST database</th><td>{{ report.parameters.blast_db or "not recorded" }}</td></tr>
+    <tr><th>Run mode</th><td>{{ summary.mode_label }}</td></tr>
+    <tr><th>Kraken2 database</th><td>{{ params.kraken_db or "not recorded" }}</td></tr>
+    {% if summary.mode == "full" %}<tr><th>BLAST database</th><td>{{ params.blast_db or "not recorded" }}</td></tr>{% endif %}
     {% set asm = report.assembly_provenance %}
     {% if asm %}
-      <tr><th>Read platform</th><td>{{ asm.read_platform.name }} ({{ asm.read_platform.evidence }})</td></tr>
+      {% if asm.read_platform %}<tr><th>Read platform</th><td>{{ asm.read_platform.name }} ({{ asm.read_platform.evidence }})</td></tr>{% endif %}
       <tr><th>Assembly</th><td>{{ asm.method or asm.assembler }}</td></tr>
       {% if asm.downsampling %}<tr><th>Downsampling</th><td>{{ asm.downsampling }} (seqkit sample, seed {{ asm.subsample_seed }})</td></tr>{% endif %}
       {% if asm.trimming %}<tr><th>Read trimming</th><td>{{ asm.trimming }}</td></tr>{% endif %}
@@ -322,39 +636,40 @@
       {% if asm.attempts and asm.attempts|length > 1 %}<tr><th>Assembly attempts</th><td>{% for a in asm.attempts %}{{ (a.max_bases / 1e6)|round|int }} Mbp: {{ a.outcome }}{% if not loop.last %}; {% endif %}{% endfor %}</td></tr>{% endif %}
     {% endif %}
     {% if report.software %}
-      {% if report.software.bracken %}<tr><th>Bracken</th><td>{{ report.software.bracken }}</td></tr>{% endif %}
-      {% if report.software.blastn %}<tr><th>BLAST</th><td>{{ report.software.blastn }}</td></tr>{% endif %}
-      {% for key, label in [('seqkit', 'seqkit'), ('fastp', 'fastp'), ('spades', 'SPAdes'), ('flye', 'Flye'), ('bwa', 'bwa'), ('minimap2', 'minimap2'), ('samtools', 'samtools'), ('freebayes', 'freebayes')] %}
+      {% for key, label in [('kraken2', 'Kraken2'), ('bracken', 'Bracken'), ('blastn', 'BLAST'), ('seqkit', 'seqkit'), ('fastp', 'fastp'), ('spades', 'SPAdes'), ('flye', 'Flye'), ('bwa', 'bwa'), ('minimap2', 'minimap2'), ('samtools', 'samtools'), ('freebayes', 'freebayes'), ('python', 'Python')] %}
         {% if report.software[key] %}<tr><th>{{ label }}</th><td>{{ report.software[key] }}</td></tr>{% endif %}
       {% endfor %}
-      {% if report.software.python %}<tr><th>Python</th><td>{{ report.software.python }}</td></tr>{% endif %}
       {% if report.software.pipeline_git_commit %}<tr><th>Pipeline revision</th><td>{{ report.software.pipeline_git_commit }}</td></tr>{% endif %}
     {% endif %}
+    {% if report.timing and report.timing.started_at %}<tr><th>Run started</th><td>{{ report.timing.started_at[:19]|replace("T", " ") }}</td></tr>{% endif %}
     {% if report.environment and report.environment.hostname %}<tr><th>Host</th><td>{{ report.environment.hostname }}</td></tr>{% endif %}
     <tr><th>Run identifier</th><td>{{ report.run_id or "not recorded" }}</td></tr>
     {% for name, digest in (report.input_sha256 or {}).items() %}{% if digest %}
-      <tr><th>Input {{ name|upper }} SHA-256</th><td class="small">{{ digest }}</td></tr>
+      <tr><th>Input {{ name|upper }} SHA-256</th><td class="mono">{{ digest }}</td></tr>
     {% endif %}{% endfor %}
   </tbody>
 </table>
-<p class="small">
-  Disclaimer: taxonomic assignment and BLAST identification are genotypic predictions made
-  against reference databases, and depend on what those databases contain — an organism absent
-  from the database cannot be reported. Low extraction rates, fragmented assemblies and thin
-  coverage all weaken an identification. These results support, but do not replace,
-  confirmatory testing. The complete output file set, including
-  <code>run_manifest.json</code> with the full machine-readable record of this run, is
-  available from the tool's Results pane.
-</p>
 
 {% if report.warnings %}
-  <h2>Warnings</h2>
-  <ul class="small">
+  {{ sec("Run warnings", "as the pipeline recorded them") }}
+  <ul class="attn">
   {% for warning in report.warnings %}
-    <li>{{ warning }}</li>
+    <li class="warn"><span class="a-detail">{{ warning }}</span></li>
   {% endfor %}
   </ul>
 {% endif %}
 
+<div class="disclaimer">
+  <b>Interpreting these results.</b> Taxonomic assignment and BLAST identification are genotypic predictions made
+  against reference databases, and depend on what those databases contain — an organism absent from the database
+  cannot be reported. Low extraction rates, fragmented assemblies and thin coverage all weaken an identification.
+  These results support, but do not replace, confirmatory testing. The complete output file set, including
+  <code>run_manifest.json</code> with the full machine-readable record of this run, is available from the tool's
+  Results pane.
+</div>
+<div class="foot">Kraken ID Parse · {{ report.sample_id }} · {{ report.report_date }}{% if report.software and report.software.pipeline_git_commit %} · pipeline revision {{ report.software.pipeline_git_commit }}{% endif %}</div>
+
+</div>
+</div>
 </body>
 </html>

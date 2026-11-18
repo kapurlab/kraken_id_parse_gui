@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from .summary import find_kraken_report, infer_run_mode, kraken_overview
+
 
 SCHEMA_VERSION = "0.1"
 
@@ -415,6 +417,9 @@ def collect_legacy_report(output_dir: Path) -> Dict[str, Any]:
         "coverage_interactive": _coverage_interactive(output_dir),
         "coverage_stats": _coverage_stats(output_dir),
         "krona": _linked_artifacts(output_dir, "krona"),
+        # What is in the sample, for every run mode — the report's summary
+        # names the most abundant taxa even when there is no target or BLAST.
+        "kraken_overview": kraken_overview(find_kraken_report(output_dir)),
     }
 
 
@@ -456,6 +461,7 @@ def build_run_manifest(
     sections: Optional[List[Dict[str, Any]]] = None,
     repo_root: Optional[Path] = None,
     beta_notice: Optional[Dict[str, str]] = None,
+    run_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     repo_root = repo_root or Path(__file__).resolve().parents[2]
     started = started_at.isoformat() if started_at else None
@@ -466,7 +472,7 @@ def build_run_manifest(
     if parameters.get("blast_db"):
         databases.append({"name": Path(str(parameters["blast_db"])).name, "path": parameters["blast_db"], "type": "blast"})
 
-    return {
+    manifest = {
         "schema_version": SCHEMA_VERSION,
         "report_date": _today_label(),
         "sample_id": sample_id,
@@ -510,6 +516,10 @@ def build_run_manifest(
         "sections": sections or [],
         "artifacts": collect_artifacts(output_dir),
     }
+    # kraken_only / parse / full. The pipeline does not pass its mode in, so
+    # it is read from what the run produced (summary.infer_run_mode).
+    manifest["run_mode"] = run_mode or infer_run_mode(manifest)
+    return manifest
 
 
 def write_manifest(manifest: Dict[str, Any], output_dir: Path) -> Path:

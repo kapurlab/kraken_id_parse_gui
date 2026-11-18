@@ -38,6 +38,7 @@ from .sra import (
     SRAExpansionError,
     build_download_script,
     expand_accessions_with_mapping,
+    is_valid_accession,
     write_crosswalk_tsv,
 )
 
@@ -65,80 +66,18 @@ _SHARED_PROJECTS = (
 # Jobs log directory (inside repo so it survives across sessions)
 _JOBS_DIR = _REPO_ROOT / "backend" / "jobs"
 
-# Shared taxon-search-name list (single source of truth, also read by the vSNP
-# GUI). A plain YAML sequence of strings — see config/taxa.yaml.
-_TAXA_YAML = _REPO_ROOT / "config" / "taxa.yaml"
+# Target names (the "Target taxon" dropdown, shared with the vSNP GUI): the
+# list that ships in config/taxa.yaml plus the names users save, which live in
+# the per-user config folder, never in this checkout. See target_names.py.
+from . import target_names  # noqa: E402
 
-_TAXA_HEADER = (
-    "# Kraken ID Parse — taxon search names\n"
-    "#\n"
-    "# Single source of truth for the \"Target Taxon\" presets shown in BOTH the\n"
-    "# Kraken ID Parse GUI and the vSNP GUI. Each entry is a taxonomy\n"
-    "# classification name passed verbatim to the read parser (-t) and must match\n"
-    "# the name exactly as Kraken reports it. Plain YAML sequence; add by hand or\n"
-    "# via the \"Add search name\" control in either GUI.\n"
-)
-
-
-def _read_taxa() -> List[str]:
-    """Read the taxon list from config/taxa.yaml.
-
-    Dependency-free parser for a flat YAML sequence (``- name`` per line) so it
-    works regardless of whether PyYAML is installed. Tolerates inline ``#``
-    comments and optional surrounding quotes. Order and duplicates are
-    preserved as written, minus blanks.
-    """
-    taxa: List[str] = []
-    try:
-        text = _TAXA_YAML.read_text(encoding="utf-8")
-    except (OSError, FileNotFoundError):
-        return taxa
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("- "):
-            line = line[2:].strip()
-        elif line == "-":
-            continue
-        # strip a trailing inline comment (only when unquoted)
-        if line and line[0] not in "\"'" and " #" in line:
-            line = line.split(" #", 1)[0].strip()
-        if len(line) >= 2 and line[0] in "\"'" and line[-1] == line[0]:
-            line = line[1:-1]
-        if line:
-            taxa.append(line)
-    return taxa
-
-
-def _taxa_yaml_line(name: str) -> str:
-    """One taxon as a YAML sequence entry, quoted when the name needs it."""
-    name = name.strip()
-    if not name:
-        return ""
-    if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
-        esc = name.replace("\\", "\\\\").replace('"', '\\"')
-        return f'- "{esc}"'
-    return f"- {name}"
-
-
-def _append_taxon(name: str) -> None:
-    """Add one taxon to the shared taxa.yaml, leaving the rest of the file alone.
-
-    This used to rewrite the file from the names the parser understood, which
-    deleted every comment in it — and the header above says entries may be
-    added "by hand", so the notes people keep beside one are real, and both
-    GUIs write this same file. An append keeps them: the existing bytes are
-    untouched and one line goes on the end.
-    """
-    _TAXA_YAML.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        text = _TAXA_YAML.read_text(encoding="utf-8")
-    except OSError:
-        text = _TAXA_HEADER
-    if text and not text.endswith("\n"):
-        text += "\n"
-    _TAXA_YAML.write_text(text + _taxa_yaml_line(name) + "\n", encoding="utf-8")
+try:
+    _MIGRATED = target_names.migrate_checkout_additions(_REPO_ROOT)
+    if _MIGRATED.get("carried"):
+        logger.info("Moved %d saved target name(s) out of config/taxa.yaml into %s",
+                    len(_MIGRATED["carried"]), target_names.saved_path())
+except Exception as exc:  # never let a carry-over stop the app starting
+    logger.warning("Target-name carry-over skipped: %s", exc)
 
 # ---------------------------------------------------------------------------
 # Version
@@ -369,6 +308,16 @@ def _list_fastq_pairs(download_dir: Path) -> List[Dict]:
         all_fq = sorted(download_dir.glob("*.fastq.gz"))
     except PermissionError:
         return []
+    # A link whose source is gone (moved, deleted, unmounted) is not a sample:
+    # its stat() below raised, and one such file failed the whole listing. The
+    # Inputs pane still shows it, marked "link broken", so it can be removed.
+    def _readable(f: Path) -> bool:
+        try:
+            f.stat()
+            return True
+        except OSError:
+            return False
+    all_fq = [f for f in all_fq if _readable(f)]
 
     # Preserve insertion order so samples appear sorted
     groups: Dict[str, Dict] = {}
@@ -426,6 +375,15 @@ def _list_project_samples(project_dir: Path) -> List[Dict]:
     download_dir = project_dir / "download"
     pairs = _list_fastq_pairs(download_dir) if download_dir.is_dir() else []
     seen = {p["sample"] for p in pairs}
+    # An SRA download into a named folder lands in download/<folder>/.
+    if download_dir.is_dir():
+        for sub in _download_subdirs(download_dir):
+            for p in _list_fastq_pairs(sub):
+                if p["sample"] in seen:
+                    continue
+                p["source"] = f"download/{sub.name}"
+                seen.add(p["sample"])
+                pairs.append(p)
 
     step1_dir = project_dir / "step1"
     if step1_dir.is_dir():
@@ -489,36 +447,74 @@ def _writable_project_dir(name: str) -> Path:
     return project_dir
 
 
+def _download_subdirs(download_dir: Path) -> List[Path]:
+    """download/'s visible sub-folders (an SRA download into a named folder)."""
+    try:
+        return sorted(d for d in download_dir.iterdir() if d.is_dir() and not d.name.startswith((".", "_")))
+    except OSError:
+        return []
+
+
 @app.get("/api/projects/{name}/inputs")
 def api_project_inputs(name: str):
-    """List files currently in <project>/download/ (name + size + mtime)."""
+    """List files in <project>/download/ and its sub-folders (one level).
+
+    `name` is the path under download/ ("sub/file" for a sub-folder), which is
+    also what DELETE takes. `dangling` marks a link whose source is gone.
+    """
     project_dir = _get_project_dir(name)
     if project_dir is None:
         raise HTTPException(404, f"Project not found: {name}")
     download_dir = project_dir / "download"
     files: List[Dict] = []
     total = 0
+
+    def _add(p: Path, rel: str) -> None:
+        nonlocal total
+        if p.name.startswith("."):
+            return
+        if p.is_symlink() and not p.exists():
+            files.append({"name": rel, "size": 0, "mtime": 0, "dangling": True})
+            return
+        if not p.is_file():
+            return
+        try:
+            st = p.stat()
+        except OSError:
+            return
+        files.append({"name": rel, "size": st.st_size, "mtime": st.st_mtime})
+        total += st.st_size
+
     if download_dir.is_dir():
         for p in sorted(download_dir.iterdir()):
-            if not p.is_file() or p.name.startswith("."):
-                continue
+            _add(p, p.name)
+        for sub in _download_subdirs(download_dir):
             try:
-                st = p.stat()
+                children = sorted(sub.iterdir())
             except OSError:
                 continue
-            files.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
-            total += st.st_size
+            for p in children:
+                _add(p, f"{sub.name}/{p.name}")
     return JSONResponse({"files": files, "total_bytes": total, "count": len(files)})
 
 
-@app.delete("/api/projects/{name}/inputs/{filename}")
+@app.delete("/api/projects/{name}/inputs/{filename:path}")
 def api_project_input_delete(name: str, filename: str):
-    if not filename or "/" in filename or "\\" in filename or filename.startswith(".") or ".." in filename:
+    """Delete one file (or link) from download/, or from one of its sub-folders."""
+    parts = [x for x in (filename or "").split("/") if x]
+    if (not parts or len(parts) > 2 or "\\" in filename
+            or any(x.startswith(".") or x == ".." for x in parts)):
         raise HTTPException(400, "Invalid filename")
     project_dir = _get_project_dir(name)
     if project_dir is None:
         raise HTTPException(404, f"Project not found: {name}")
-    target = project_dir / "download" / filename
+    download_dir = (project_dir / "download")
+    target = download_dir.joinpath(*parts)
+    # The link itself must sit inside download/ (its source may be anywhere).
+    try:
+        target.parent.resolve().relative_to(download_dir.resolve())
+    except (ValueError, OSError):
+        raise HTTPException(400, "Invalid filename")
     if not target.is_file() and not target.is_symlink():
         raise HTTPException(404, f"File not found: {filename}")
     target.unlink()
@@ -546,32 +542,62 @@ async def api_project_upload(name: str, files: List[UploadFile] = File(...)):
 
 
 class LinkLocalRequest(BaseModel):
-    path: str
+    path: Optional[str] = None
+    paths: Optional[List[str]] = None
 
 
 @app.post("/api/projects/{name}/link-local")
 def api_project_link_local(name: str, payload: LinkLocalRequest):
-    """Symlink every *.fastq.gz under a server-side directory into download/.
+    """Symlink server-side FASTQs into download/ — folders and/or single files.
 
-    Lets users 'import' reads that already live on the shared filesystem
-    without copying gigabytes around.
+    Lets users bring in reads that already live on the shared filesystem
+    without copying gigabytes around. Same contract as the vSNP GUI's
+    link-local: a folder contributes every *.fastq.gz directly inside it; one
+    bad path does not throw away the rest of a multi-select. Returns what
+    happened to each: linked, already there, not found, not a .fastq.gz.
     """
     project_dir = _writable_project_dir(name)
-    src = Path((payload.path or "").strip()).expanduser()
-    if not src.exists():
-        raise HTTPException(400, f"Input path not found: {src}")
+    raw_paths = [str(payload.path or "")] + list(payload.paths or [])
+    raw_paths = [r.strip() for r in raw_paths if r and r.strip()]
+    if not raw_paths:
+        raise HTTPException(400, "No input path given")
     download_dir = project_dir / "download"
-    # Accept either a directory of fastqs or a single fastq file.
-    candidates = [src] if src.is_file() else sorted(src.glob("*.fastq.gz"))
-    count = 0
-    for f in candidates:
-        if not f.name.endswith(".fastq.gz"):
+    candidates: List[Path] = []
+    missing: List[str] = []
+    skipped: List[str] = []
+    for raw in raw_paths:
+        src = Path(raw).expanduser()
+        if not src.exists():
+            missing.append(str(src))
             continue
+        if src.is_file():
+            # Only .fastq.gz: the sample list and the pipeline pair reads by
+            # that suffix, so a .fq.gz would link and then never show up.
+            if src.name.endswith(".fastq.gz"):
+                candidates.append(src)
+            else:
+                skipped.append(src.name)
+        else:
+            candidates.extend(sorted(src.glob("*.fastq.gz")))
+            skipped.extend(sorted(f.name for f in src.glob("*.fq.gz")))
+    if missing and not candidates:
+        raise HTTPException(400, f"Input path not found: {missing[0]}")
+    count = 0
+    already: List[str] = []
+    for f in sorted(set(candidates)):
         target = download_dir / f.name
-        if not target.exists():
-            target.symlink_to(f.resolve())
-            count += 1
-    return JSONResponse({"linked": count})
+        # is_symlink too: a dangling link still occupies the name.
+        if target.exists() or target.is_symlink():
+            already.append(f.name)
+            continue
+        target.symlink_to(f.resolve())
+        count += 1
+    return JSONResponse({
+        "linked": count,
+        "already_present": already,
+        "missing": missing,
+        "skipped_not_fastq": skipped,
+    })
 
 
 class SraRequest(BaseModel):
@@ -585,6 +611,14 @@ def api_project_sra_download(name: str, payload: SraRequest):
     download/. Uses curl/ENA + (if present) fasterq-dump — the script skips
     whatever tool isn't installed, so it works with just curl/wget."""
     project_dir = _writable_project_dir(name)
+    # Refuse a mistyped accession with a message that says so (expansion
+    # failures are reported as NCBI trouble, which would mislead here).
+    bad = [a for a in (payload.accessions or []) if str(a).strip() and not is_valid_accession(str(a))]
+    if bad:
+        shown = ", ".join(repr(b) for b in bad[:5])
+        more = f" (+{len(bad) - 5} more)" if len(bad) > 5 else ""
+        raise HTTPException(400, f"Not an SRA/ENA accession: {shown}{more}. "
+                                 "Accessions are letters, digits, dot, underscore and hyphen.")
     try:
         expanded, mapping = expand_accessions_with_mapping(payload.accessions, strict=True)
     except SRAExpansionError as e:
@@ -601,7 +635,17 @@ def api_project_sra_download(name: str, payload: SraRequest):
         write_crosswalk_tsv(download_root, mapping)
     except OSError as e:
         logger.warning("Failed to write sra_crosswalk.tsv: %s", e)
-    script = build_download_script(download_root, expanded, allow_insecure_https=False)
+    script = build_download_script(
+        download_root,
+        expanded,
+        allow_insecure_https=False,
+        # A sample the project already holds (reads kept in step1/<acc>/ by a
+        # vSNP run) is listed here too, so it is skipped, not fetched again.
+        step1_dir=project_dir / "step1",
+        # Always top-level download/, whatever the sub-folder, so the report
+        # endpoint has one place to read.
+        report_path=project_dir / "download" / "sra_download_report.tsv",
+    )
     script_path = download_root / "download_sra.sh"
     script_path.write_text(script, encoding="utf-8")
     script_path.chmod(0o755)
@@ -613,6 +657,33 @@ def api_project_sra_download(name: str, payload: SraRequest):
         env=env,
     )
     return JSONResponse({"job_id": job_id})
+
+
+@app.get("/api/projects/{name}/sra-download-report")
+def api_project_sra_download_report(name: str):
+    """The last SRA download's outcome per accession, in buckets.
+
+    Written by the download script as download/sra_download_report.tsv. Empty
+    buckets (not 404) when no download has run, so the UI treats both alike.
+    """
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    report = project_dir / "download" / "sra_download_report.tsv"
+    buckets: Dict[str, List[str]] = {"downloaded": [], "already_in_step1": [], "failed": []}
+    if report.is_file():
+        try:
+            lines = report.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            if not line or line.startswith("#"):
+                continue
+            outcome, _, acc = line.partition("\t")
+            acc = acc.strip()
+            if acc and outcome in buckets:
+                buckets[outcome].append(acc)
+    return JSONResponse(buckets)
 
 
 @app.get("/api/projects/{name}/sra-crosswalk")
@@ -885,10 +956,28 @@ def api_project_file(name: str, path: str = Query(...), inline: int = 0):
     return FileResponse(target, media_type=media_type, headers=headers)
 
 
+def _home_short(p: Path) -> str:
+    """A path as people read it: ~/… when it is under the home folder."""
+    try:
+        return "~/" + str(Path(p).relative_to(Path.home()))
+    except ValueError:
+        return str(p)
+
+
+def _taxa_payload(**extra) -> Dict[str, Any]:
+    entries = target_names.entries(_REPO_ROOT)
+    return {
+        "taxa": [e["name"] for e in entries],
+        "entries": entries,
+        "saved_file": _home_short(target_names.saved_path()),
+        **extra,
+    }
+
+
 @app.get("/api/taxa")
 def api_get_taxa():
-    """Return the configured taxon search names (config/taxa.yaml)."""
-    return JSONResponse({"taxa": _read_taxa()})
+    """Every target name: the shipped list, then the names users saved."""
+    return JSONResponse(_taxa_payload())
 
 
 class TaxonPayload(BaseModel):
@@ -897,22 +986,75 @@ class TaxonPayload(BaseModel):
 
 @app.post("/api/taxa")
 def api_add_taxon(payload: TaxonPayload):
-    """Append a new taxon search name to config/taxa.yaml (no duplicates).
+    """Save a new target name (no duplicates, case-insensitive).
 
-    Returns the full updated list so the caller can refresh in one round trip.
+    Returns the whole list so the caller refreshes in one round trip.
     """
-    name = (payload.name or "").strip()
-    if not name:
-        raise HTTPException(400, "A taxon name is required.")
-    taxa = _read_taxa()
-    if any(name.lower() == t.lower() for t in taxa):
-        return JSONResponse({"taxa": taxa, "added": False})
-    taxa.append(name)
     try:
-        _append_taxon(name)
+        res = target_names.add(_REPO_ROOT, payload.name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     except OSError as exc:
-        raise HTTPException(500, f"Could not save taxon list: {exc}")
-    return JSONResponse({"taxa": taxa, "added": True})
+        raise HTTPException(500, f"Could not save to {target_names.saved_path()}: {exc}")
+    return JSONResponse(_taxa_payload(name=res["name"], added=res["added"]))
+
+
+@app.post("/api/taxa/remove")
+def api_remove_taxon(payload: TaxonPayload):
+    """Remove a saved target name. Names that ship with the tool stay."""
+    try:
+        res = target_names.remove(_REPO_ROOT, payload.name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except OSError as exc:
+        raise HTTPException(500, f"Could not save to {target_names.saved_path()}: {exc}")
+    return JSONResponse(_taxa_payload(removed=res["removed"]))
+
+
+def _project_report_names(project_dir: Path, min_percent: float) -> List[Dict[str, Any]]:
+    """Taxon names from every Kraken report in a project, best evidence first.
+
+    One entry per name with the highest clade % seen, its rank, and how many
+    samples reported it. These are the names exactly as Kraken spells them —
+    the spelling the read parser needs.
+    """
+    best: Dict[str, Dict[str, Any]] = {}
+    kdir = project_dir / "kraken"
+    if not kdir.is_dir():
+        return []
+    try:
+        sample_dirs = [d for d in kdir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    except OSError:
+        return []
+    for sdir in sample_dirs:
+        reports = sorted((sdir / "kraken").glob("*_reportkraken.txt")) if (sdir / "kraken").is_dir() else []
+        if not reports:
+            continue
+        report = max(reports, key=lambda r: r.stat().st_mtime)
+        seen_here = set()
+        for row in target_names.report_names(report, min_percent):
+            key = row["name"].lower()
+            if key in seen_here:
+                continue
+            seen_here.add(key)
+            cur = best.get(key)
+            if cur is None:
+                best[key] = {**row, "samples": 1, "best_sample": sdir.name}
+            else:
+                cur["samples"] += 1
+                if row["percent"] > cur["percent"]:
+                    cur.update(percent=row["percent"], reads=row["reads"], best_sample=sdir.name)
+    return sorted(best.values(), key=lambda r: (-r["percent"], r["name"].lower()))
+
+
+@app.get("/api/projects/{name}/report-taxa")
+def api_project_report_taxa(name: str, min_percent: float = Query(0.01)):
+    """Names Kraken reported in this project's runs, for picking a target name."""
+    project_dir = _get_project_dir(name)
+    if project_dir is None:
+        raise HTTPException(404, f"Project not found: {name}")
+    rows = _project_report_names(project_dir, max(0.0, min_percent))
+    return JSONResponse({"names": rows[:2000], "total": len(rows)})
 
 
 @app.get("/api/config")
@@ -1198,8 +1340,16 @@ def api_save_config(payload: ConfigPayload):
     return JSONResponse({"ok": True})
 
 
+def _disk_usage_for(p: Path) -> Optional[Dict[str, int]]:
+    try:
+        u = shutil.disk_usage(p)
+    except OSError:
+        return None
+    return {"total": u.total, "free": u.free, "used": u.used}
+
+
 @app.get("/api/browse-dirs")
-def api_browse_dirs(path: str = ""):
+def api_browse_dirs(path: str = "", include_files: bool = False, exts: str = ""):
     """List sub-directories of `path` for the project-root folder picker.
 
     Runs as the OOD session user, so the OS filesystem permissions are the only
@@ -1213,7 +1363,12 @@ def api_browse_dirs(path: str = ""):
         raise HTTPException(400, "Invalid path")
     if not p.is_dir():
         raise HTTPException(400, f"Not a directory: {p}")
+    # include_files=1 (the "Browse server files" picker) also lists the
+    # folder's files, narrowed to ?exts= suffixes, so reads already on the
+    # server are linked in place instead of uploaded.
+    suffixes = tuple(x.strip().lower() for x in exts.split(",") if x.strip())
     entries: List[Dict[str, str]] = []
+    files: List[Dict[str, Any]] = []
     try:
         for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
             if child.name.startswith("."):
@@ -1221,12 +1376,24 @@ def api_browse_dirs(path: str = ""):
             try:
                 if child.is_dir():
                     entries.append({"name": child.name, "path": str(child)})
+                elif include_files and child.is_file():
+                    if suffixes and not child.name.lower().endswith(suffixes):
+                        continue
+                    try:
+                        size = child.stat().st_size
+                    except OSError:
+                        size = 0
+                    files.append({"name": child.name, "path": str(child), "size": size})
             except OSError:
                 continue
     except PermissionError:
         raise HTTPException(403, f"Permission denied: {p}")
     parent = str(p.parent) if p.parent != p else None
-    return JSONResponse({"path": str(p), "parent": parent, "entries": entries})
+    return JSONResponse({
+        "path": str(p), "parent": parent, "entries": entries, "files": files,
+        "disk": _disk_usage_for(p),
+        "writable": os.access(p, os.W_OK | os.X_OK),
+    })
 
 
 class RunPayload(BaseModel):
@@ -1294,8 +1461,12 @@ def api_run(payload: RunPayload):
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Build argv without a shell so project/sample/taxon/db values cannot be
-    # interpreted as shell syntax.
-    script = _BIN_DIR / "kraken_id_parse.py"
+    # interpreted as shell syntax. A Kraken-only run goes through a GUI-side
+    # wrapper that runs the same pipeline and then writes report.html/.pdf —
+    # the pipeline itself stops at the Krona chart in that mode and writes no
+    # report (bin/reporting/kraken_only_report.py).
+    script = (_BIN_DIR / "reporting" / "kraken_only_report.py") if payload.kraken_only \
+        else (_BIN_DIR / "kraken_id_parse.py")
     # -u: unbuffered stdout/stderr so the parent script's progress prints stream
     # to the log in real time and in order (otherwise Python block-buffers when
     # stdout is a pipe and the log appears to freeze between subprocess outputs).
@@ -1311,7 +1482,7 @@ def api_run(payload: RunPayload):
     if kraken_db:
         command.extend(["-k", kraken_db])
     if payload.kraken_only:
-        command.append("--kraken-only")
+        pass  # the wrapper adds --kraken-only itself
     elif payload.no_blast:
         command.append("--no-blast")
     elif blast_db:
@@ -1593,7 +1764,9 @@ def _render_api_report_html(run_dir: Path, report_html: Path) -> Optional[str]:
         from reporting.html_renderer import render_html_text
 
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return render_html_text(manifest, asset_mode="api")
+        # base_dir: the run folder as it is now, so a run whose folder has
+        # moved since still finds its Kraken report and Krona chart.
+        return render_html_text(manifest, asset_mode="api", base_dir=run_dir)
     except Exception as exc:
         logger.warning("Could not render API report HTML from %s: %s", manifest_path, exc)
         try:
@@ -1820,38 +1993,163 @@ def _rp_json(run_dir: Path, name: str) -> Dict[str, Any]:
 _rp_status = _sample_run_status
 
 
-def _rp_metrics(run_dir: Path) -> Dict[str, Any]:
-    """Top two taxa from the Kraken report.
+def _rp_kraken_top(report: Path) -> List[tuple]:
+    """Species-level calls from a Kraken report, best first, one per lineage.
 
-    Parsed from the report rather than a summary file because this pipeline does
-    not write one. Kraken report columns are:
-      pct, clade_reads, direct_reads, rank, taxid, name
-    We want species rows (rank S) ordered by percentage."""
-    rows = []
+    Candidates are species (S), the ranks below species (S1, S2…) and the
+    species groups between genus and species (G1, G2… — e.g. "Mycobacterium
+    tuberculosis complex"). Kraken often assigns most reads to such a group
+    rather than to one species, so looking at S rows alone called a 95% MTBC
+    sample "M. orygis 2.9%". A candidate nested inside a better one (or holding
+    it) is the same answer at another depth, so the runner-up is the best
+    candidate from a DIFFERENT lineage. Returns [(pct, name), …].
+    """
+    cands = []           # (pct, name, path_of_names)
+    stack: List[tuple] = []  # (indent, name)
+    with open(report, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 6:
+                continue
+            raw = parts[-1]
+            name = raw.strip()
+            indent = len(raw) - len(raw.lstrip(" "))
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            stack.append((indent, name))
+            rank = parts[-3].strip()
+            if not (rank == "S" or re.match(r"^S\d+$", rank) or re.match(r"^G\d+$", rank)):
+                continue
+            try:
+                pct = float(parts[0])
+            except ValueError:
+                continue
+            cands.append((pct, name, tuple(n for _, n in stack)))
+    cands.sort(key=lambda c: -c[0])
+    picked: List[tuple] = []
+    for pct, name, path in cands:
+        if any(name in other_path or other_name in path for _, other_name, other_path in picked):
+            continue
+        picked.append((pct, name, path))
+        if len(picked) == 2:
+            break
+    return [(pct, name) for pct, name, _ in picked]
+
+
+def _rp_metrics(run_dir: Path) -> Dict[str, Any]:
+    """What Kraken found (top call and runner-up) plus what the run was for.
+
+    Parsed from the Kraken report rather than a summary file because this
+    pipeline does not write one; see _rp_kraken_top for how the calls are
+    chosen and _rp_run_facts for the rest."""
+    empty = {"top_taxon": None, "top_pct": None, "runner_up": None}
     try:
-        reports = sorted(run_dir.rglob("*_reportkraken.txt")) or sorted(run_dir.rglob("*report*kraken*.txt"))
-        if not reports:
-            return {"top_taxon": None, "top_pct": None, "runner_up": None}
-        with open(reports[0], "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) < 6 or parts[3].strip() != "S":
-                    continue
-                try:
-                    pct = float(parts[0])
-                except ValueError:
-                    continue
-                rows.append((pct, parts[5].strip()))
+        reports = sorted(run_dir.glob("kraken/*_reportkraken.txt")) or sorted(run_dir.rglob("*_reportkraken.txt"))
+        top2 = _rp_kraken_top(max(reports, key=lambda r: r.stat().st_mtime)) if reports else []
     except OSError:
-        return {"top_taxon": None, "top_pct": None, "runner_up": None}
-    rows.sort(reverse=True)
-    top = rows[0] if rows else None
-    second = rows[1] if len(rows) > 1 else None
-    return {
-        "top_taxon": top[1] if top else None,
-        "top_pct": ("%.1f%%" % top[0]) if top else None,
-        "runner_up": ("%s (%.1f%%)" % (second[1], second[0])) if second else None,
-    }
+        top2 = []
+    top = top2[0] if top2 else None
+    second = top2[1] if len(top2) > 1 else None
+    def _pct(x: float) -> str:
+        return "%.1f%%" % x if x >= 1 else "%.2f%%" % x if x >= 0.01 else "<0.01%"
+    out = dict(empty)
+    if top:
+        out.update(top_taxon=top[1], top_pct=_pct(top[0]))
+    if second:
+        out["runner_up"] = "%s (%s)" % (second[1], _pct(second[0]))
+    out.update(_rp_run_facts(run_dir))
+    return out
+
+
+_RP_MODE_LABEL = {"kraken_only": "Krona only", "parse": "Parsed reads", "full": "Full ID"}
+
+
+def _rp_last_command(run_dir: Path) -> str:
+    """The pipeline command line of the latest run in this folder ("" if unknown).
+
+    The GUI appends one block per run to .provenance/kraken_id_parse_gui_run_cmd.txt;
+    the last non-comment line is the command that produced what is there now."""
+    try:
+        text = (run_dir / ".provenance" / "kraken_id_parse_gui_run_cmd.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = [l.strip() for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    return lines[-1] if lines else ""
+
+
+def _rp_short_subject(description: str) -> str:
+    """'NC_000962 Mycobacterium tuberculosis H37Rv, complete genome' -> the organism."""
+    d = re.sub(r"^\S+\s+", "", (description or "").strip(), count=1) if re.match(r"^[A-Z]{1,4}_?[A-Z]*\d", description or "") else (description or "").strip()
+    d = re.sub(r",\s*(complete genome|complete sequence|whole genome shotgun sequence|chromosome.*)$", "", d, flags=re.I)
+    return d.strip()
+
+
+def _rp_run_facts(run_dir: Path) -> Dict[str, Any]:
+    """What was asked of the run and what it answered, for the Results table.
+
+    mode            Krona only / Parsed reads / Full ID
+    target          the target name the reads were parsed for
+    target_pct      share of reads extracted for it ("95.3%")
+    target_reads    reads extracted ("559,228 of 586,737")
+    identification  the strongest BLAST match's organism (Full ID runs)
+    ident_share     that match's share of the assembled bases ("92%")
+    """
+    facts: Dict[str, Any] = {"mode": None, "target": None, "target_pct": None,
+                             "target_reads": None, "identification": None, "ident_share": None}
+    cmd = _rp_last_command(run_dir)
+    man = _rp_json(run_dir, "run_manifest.json")
+    legacy = man.get("legacy_report") if isinstance(man.get("legacy_report"), dict) else {}
+    target = legacy.get("target") if isinstance(legacy.get("target"), dict) else {}
+    blast = [r for r in (legacy.get("blast_rows") or []) if isinstance(r, dict)]
+    # What the report says wins: the manifest's run_mode (recorded since
+    # 2026-11), else what the manifest's contents show. A later Kraken-only run
+    # in the same folder keeps a richer report (kraken_only_report.py), so the
+    # row keeps describing it. No manifest: the recorded command, then the files.
+    if man.get("run_mode") in _RP_MODE_LABEL:
+        mode = man["run_mode"]
+    elif man:
+        if blast or any(run_dir.glob("*_denovo.fasta")) or any(run_dir.glob("*_blast_summary.txt")):
+            mode = "full"
+        elif target or "--no-blast" in cmd:
+            mode = "parse"
+        else:
+            mode = "kraken_only" if ("--kraken-only" in cmd or "kraken_only_report.py" in cmd) else "parse"
+    elif "--kraken-only" in cmd or "kraken_only_report.py" in cmd:
+        mode = "kraken_only"
+    elif "--no-blast" in cmd:
+        mode = "parse"
+    elif cmd:
+        mode = "full"
+    else:
+        mode = "kraken_only" if any(run_dir.glob("kraken/*_krona.html")) else None
+    facts["mode"] = _RP_MODE_LABEL.get(mode) if mode else None
+    if mode == "kraken_only":
+        return facts
+    taxon = target.get("taxon") or (man.get("parameters") or {}).get("taxon")
+    facts["target"] = taxon or None
+    rate = target.get("extraction_rate")
+    try:
+        facts["target_pct"] = "%.1f%%" % float(str(rate).rstrip("%")) if rate not in (None, "") else None
+    except ValueError:
+        facts["target_pct"] = None
+    ex, tot = target.get("extracted_reads"), target.get("total_input_reads")
+    try:
+        if ex not in (None, ""):
+            facts["target_reads"] = f"{int(ex):,}" + (f" of {int(tot):,}" if tot not in (None, "") else "")
+    except (TypeError, ValueError):
+        pass
+    if blast:
+        def _nt(r):
+            try:
+                return int(str(r.get("nt_base_count") or "0").replace(",", ""))
+            except ValueError:
+                return 0
+        best = max(blast, key=_nt)
+        total = sum(_nt(r) for r in blast)
+        facts["identification"] = _rp_short_subject(str(best.get("description") or "")) or None
+        if total:
+            facts["ident_share"] = "%.0f%%" % (100.0 * _nt(best) / total)
+    return facts
 
 
 # No cross-tool probes: the entry the shared scaffold shipped with pointed at
@@ -1945,7 +2243,12 @@ def api_project_results(name: str, all: int = Query(0)):
 
 _RP_EXPORT_COLUMNS = [("sample", "Sample"), ("status", "Status"),
                       ("run_date", "Run date"), ("qc", "QC"),
-                      ("qc_reasons", "QC notes")] + [("top_taxon", "Top taxon"), ("top_pct", "Percent"), ("runner_up", "Runner-up")] + \
+                      ("qc_reasons", "QC notes")] + [("mode", "Run mode"), ("target", "Target name"),
+                                                    ("target_pct", "Target reads %"), ("target_reads", "Target reads"),
+                                                    ("identification", "Identification (BLAST)"),
+                                                    ("ident_share", "Share of assembled bases"),
+                                                    ("top_taxon", "Top species (Kraken)"), ("top_pct", "Percent"),
+                                                    ("runner_up", "Runner-up")] + \
                      [("run_dir", "Run directory")]
 
 

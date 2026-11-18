@@ -7,6 +7,9 @@ import ResultsPane from "./ResultsPane";
 import { useResults } from "./useResults";
 import CopyLogButton from "./CopyLogButton";
 import { PaneSplitters } from "./SplitPane";
+import InputsPane from "./InputsPane";
+import TargetNamePicker, { useTargetNames } from "./TargetNames";
+import { usePaneExpand } from "./PaneBits";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -15,16 +18,6 @@ import { PaneSplitters } from "./SplitPane";
 // describe — the same string the Diagnostic Tools Dashboard shows) and
 // uses this constant just until that arrives / on installs without git.
 const APP_VERSION = "0.2.9";
-
-// Taxon presets are loaded at runtime from the shared config/taxa.yaml via
-// /api/taxa. This fallback is only used if that fetch fails.
-const TAXON_PRESETS_FALLBACK = [
-  "Mycobacterium tuberculosis complex",
-  "Mycobacterium bovis",
-  "Orbivirus",
-  "Apicomplexa",
-  "Isavirus salaris",
-];
 
 // The Orbivirus (BTV/EHD) analysis is beta. The pipeline's reports, workbook and
 // the Results pane say so too; bin/orbivirus_beta.py holds the same wording and
@@ -61,12 +54,10 @@ export default function App() {
   /* Every completed sample for the active project. Refreshed when a run
      finishes rather than polled, matching the rest of the suite. */
   const results = useResults(activeProject);
-  const [addPath, setAddPath] = useState({});       // proj -> import path string
-  const [sraText, setSraText] = useState({});       // proj -> SRA accessions string
-  const [addStatus, setAddStatus] = useState({});   // proj -> status message
-  const [inputsByProj, setInputsByProj] = useState({}); // proj -> {files,count,total_bytes}
-  const uploadProjRef = useRef("");                 // which project the file dialog targets
-  const uploadInputRef = useRef(null);
+  // Bumped to make the Inputs pane read download/ again (a new project, a
+  // finished run). The pane owns its own listing.
+  const [inputsRefresh, setInputsRefresh] = useState(0);
+  const panes = usePaneExpand();
   const [expanded, setExpanded] = useState({});          // project name → bool
   const [samples, setSamples] = useState({});            // project name → [sample]
   const [checkedKeys, setCheckedKeys] = useState({});    // key → {project, ...sample}  (batch selection)
@@ -76,9 +67,8 @@ export default function App() {
   const [activeRun, setActiveRun] = useState(null);      // {project, sample} currently running
   const [queueInfo, setQueueInfo] = useState({ total: 0, done: 0 }); // batch progress
   const [taxon, setTaxon] = useState("");
-  const [taxonPresets, setTaxonPresets] = useState(TAXON_PRESETS_FALLBACK); // from /api/taxa
-  const [newTaxon, setNewTaxon] = useState("");          // "add search name" input
-  const [addingTaxon, setAddingTaxon] = useState(false);
+  // Target names: shipped + saved by the user (see TargetNames.jsx).
+  const targetNames = useTargetNames();
   /* One of three mutually exclusive run modes, so the pipeline's three stopping
      points are each a thing you pick rather than a combination of two negative
      checkboxes ("not kraken-only, not no-blast" meant full identification).
@@ -143,10 +133,58 @@ export default function App() {
       }
       return null;
     };
+    const m = (row) => row.metrics || {};
+    const num = (v) => {
+      const n = Number(String(v ?? "").replace(/[<,%\s]/g, ""));
+      return Number.isFinite(n) ? n : null;
+    };
+    const MODE_CLASS = { "Krona only": "mode-krona", "Parsed reads": "mode-parse", "Full ID": "mode-full" };
     return [
-      { key: "top_taxon", label: "Top taxon" },
-      { key: "top_pct", label: "%", align: "right" },
-      { key: "runner_up", label: "Runner-up" },
+      {
+        key: "mode",
+        label: "Mode",
+        render: (row) => (m(row).mode
+          ? <span className={`mode-chip ${MODE_CLASS[m(row).mode] || ""}`}>{m(row).mode}</span>
+          : "—"),
+      },
+      {
+        // What Kraken says is in the sample: the best species-level call and
+        // the best call from a different lineage (backend _rp_kraken_top).
+        key: "top_taxon",
+        label: "Kraken: most reads",
+        sortValue: (row) => num(m(row).top_pct),
+        render: (row) => (m(row).top_taxon ? (
+          <div className="cell-2" title={`${m(row).top_taxon} ${m(row).top_pct}${m(row).runner_up ? `\nthen ${m(row).runner_up}` : ""}`}>
+            <span><strong className="cell-num">{m(row).top_pct}</strong> {m(row).top_taxon}</span>
+            {m(row).runner_up && <span className="muted">then {m(row).runner_up}</span>}
+          </div>
+        ) : "—"),
+      },
+      {
+        key: "target_pct",
+        label: "Target reads",
+        sortValue: (row) => num(m(row).target_pct),
+        render: (row) => (m(row).target ? (
+          <div className="cell-2"
+               title={`${m(row).target}${m(row).target_reads ? `\n${m(row).target_reads} reads extracted` : ""}`}>
+            <span><strong className="cell-num">{m(row).target_pct || "—"}</strong>
+              {m(row).target_reads && <span className="muted"> · {m(row).target_reads.split(" of ")[0]} reads</span>}</span>
+            <span className="muted">{m(row).target}</span>
+          </div>
+        ) : <span className="muted">{m(row).mode === "Krona only" ? "not parsed" : "—"}</span>),
+      },
+      {
+        key: "identification",
+        label: "Identification (BLAST)",
+        render: (row) => (m(row).identification ? (
+          <div className="cell-2" title={`${m(row).identification}${m(row).ident_share ? `\n${m(row).ident_share} of the assembled bases` : ""}`}>
+            <strong>{m(row).identification}</strong>
+            {m(row).ident_share && <span className="muted">{m(row).ident_share} of assembled bases</span>}
+          </div>
+        ) : <span className="muted">
+              {m(row).mode === "Full ID" ? "no BLAST match" : m(row).mode ? "not run in this mode" : "—"}
+            </span>),
+      },
       {
         key: "quick_open",
         label: "Open",
@@ -203,12 +241,6 @@ export default function App() {
       })
       .catch(() => {});
     loadKnownDbs();
-    fetch("./api/taxa")
-      .then((r) => r.json())
-      .then((d) => {
-        if (Array.isArray(d.taxa) && d.taxa.length) setTaxonPresets(d.taxa);
-      })
-      .catch(() => {});
     loadProjects();
     // The Results table is where finished work is now read, so it
     // has to reflect the run that just ended.
@@ -245,30 +277,6 @@ export default function App() {
       .catch(() => setProjectsLoading(false));
   }
 
-  // Persist a new taxon search name to the shared config/taxa.yaml and select it.
-  async function addTaxon() {
-    const name = newTaxon.trim();
-    if (!name || addingTaxon) return;
-    setAddingTaxon(true);
-    try {
-      const res = await fetch("./api/taxa", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      if (res.ok) {
-        const d = await res.json();
-        if (Array.isArray(d.taxa)) setTaxonPresets(d.taxa);
-        setTaxon(name);
-        setNewTaxon("");
-      }
-    } catch (_) {
-      /* leave the input as-is so the user can retry */
-    } finally {
-      setAddingTaxon(false);
-    }
-  }
-
   // Create a new project (personal root by default). Projects share the same
   // on-disk layout vSNP uses, so a project made here also shows up in vSNP GUI.
   async function createProject() {
@@ -296,7 +304,7 @@ export default function App() {
         const n = created.name;
         setExpanded((e) => ({ ...e, [n]: true }));
         setActiveProject(n);
-        await Promise.all([fetchSamples(n), loadInputs(n)]);
+        await fetchSamples(n);
       }
     } finally {
       setCreatingProject(false);
@@ -330,13 +338,7 @@ export default function App() {
       return;
     }
     if (!activeProject || !projects.find((p) => p.name === activeProject)) {
-      const first = projects[0].name;
-      setActiveProject(first);
-      if (inputsByProj[first] === undefined) loadInputs(first);
-    } else if (inputsByProj[activeProject] === undefined) {
-      // Restored from localStorage: the Inputs pane needs its file list too,
-      // which selectProject would normally have loaded.
-      loadInputs(activeProject);
+      setActiveProject(projects[0].name);
     }
   }, [projects, projectsLoading]);
 
@@ -368,115 +370,32 @@ export default function App() {
     setExpanded((e) => ({ ...e, [name]: !isExpanded }));
     // Target this project for the Inputs pane whenever the user opens it.
     setActiveProject(name);
-    if (!isExpanded) {
-      if (!samples[name]) fetchSamples(name);
-      loadInputs(name);
-    }
+    if (!isExpanded && !samples[name]) fetchSamples(name);
   }
 
   // Make a project the Inputs-pane target without toggling its expansion.
   function selectProject(name) {
     setActiveProject(name);
-    if (inputsByProj[name] === undefined) loadInputs(name);
   }
 
-  // ---- Sample loading (import / upload / SRA) -------------------------------
-  function loadInputs(name) {
-    return fetch(`./api/projects/${encodeURIComponent(name)}/inputs`)
-      .then((r) => r.json())
-      .then((data) => setInputsByProj((m) => ({ ...m, [name]: data })))
-      .catch(() => setInputsByProj((m) => ({ ...m, [name]: { files: [], count: 0, total_bytes: 0 } })));
-  }
-
-  const setStat = (name, msg) => setAddStatus((m) => ({ ...m, [name]: msg }));
-
-  async function refreshAfterLoad(name) {
-    await Promise.all([fetchSamples(name), loadInputs(name)]);
+  // ---- Inputs pane callbacks ------------------------------------------------
+  // Reads were added or removed: the project's sample list and counts change.
+  function onInputsChanged(name) {
+    if (expanded[name] || samples[name]) fetchSamples(name);
     loadProjects();
   }
 
-  async function linkLocal(name) {
-    const path = (addPath[name] || "").trim();
-    if (!path) return;
-    setStat(name, "Linking…");
-    try {
-      const res = await fetch(`./api/projects/${encodeURIComponent(name)}/link-local`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { setStat(name, `Import failed: ${data.detail || res.status}`); return; }
-      setStat(name, `Linked ${data.linked} file${data.linked === 1 ? "" : "s"}.`);
-      setAddPath((m) => ({ ...m, [name]: "" }));
-      await refreshAfterLoad(name);
-    } catch (e) {
-      setStat(name, `Import failed: ${e.message}`);
-    }
-  }
-
-  function pickFiles(name) {
-    uploadProjRef.current = name;
-    uploadInputRef.current?.click();
-  }
-
-  async function uploadFiles(name, fileList) {
-    const files = Array.from(fileList || []).filter((f) => f.name.endsWith(".fastq.gz"));
-    if (!name || !files.length) return;
-    const fd = new FormData();
-    files.forEach((f) => fd.append("files", f));
-    setStat(name, `Uploading ${files.length} file${files.length === 1 ? "" : "s"}…`);
-    try {
-      const res = await fetch(`./api/projects/${encodeURIComponent(name)}/upload`, { method: "POST", body: fd });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { setStat(name, `Upload failed: ${data.detail || res.status}`); return; }
-      setStat(name, `Uploaded ${data.uploaded} file${data.uploaded === 1 ? "" : "s"}.`);
-      await refreshAfterLoad(name);
-    } catch (e) {
-      setStat(name, `Upload failed: ${e.message}`);
-    }
-  }
-
-  function parseAccessions(text) {
-    return (text || "").split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-  }
-
-  async function sraDownload(name) {
-    const accessions = parseAccessions(sraText[name]);
-    if (!accessions.length) return;
-    setStat(name, `Resolving ${accessions.length} accession${accessions.length === 1 ? "" : "s"}…`);
-    setShowLogs(true);
-    try {
-      const res = await fetch(`./api/projects/${encodeURIComponent(name)}/sra/download`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accessions }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { setStat(name, `Download failed: ${data.detail || res.status}`); return; }
-      setStat(name, "Downloading… progress shows in the Pipeline Log below.");
-      setSraText((m) => ({ ...m, [name]: "" }));
-      // Stream the download log into the shared log panel; refresh when done.
-      setJobId(data.job_id);
+  // An SRA download streams into the Pipeline Log like a run. Resolves with
+  // the job's final status once it ends.
+  function followSraJob(id, project) {
+    return new Promise((resolve) => {
+      setShowLogs(true);
+      setJobId(id);
       setJobStatus("running");
       setLogLines([]);
-      streamLogUntilDone(data.job_id, null, () => {
-        setStat(name, "Download finished — see samples below.");
-        refreshAfterLoad(name);
-      });
-    } catch (e) {
-      setStat(name, `Download failed: ${e.message}`);
-    }
-  }
-
-  async function deleteInput(name, filename) {
-    if (!(await askOnPage({ okLabel: "Remove", message: `Remove ${filename} from this project's download/ folder?` }))) return;
-    try {
-      await fetch(`./api/projects/${encodeURIComponent(name)}/inputs/${encodeURIComponent(filename)}`, { method: "DELETE" });
-      await refreshAfterLoad(name);
-    } catch (e) {
-      setStat(name, `Delete failed: ${e.message}`);
-    }
+      setCurrentStep(`SRA download into ${project}`);
+      streamLogUntilDone(id, null, (status) => resolve(status));
+    });
   }
 
   // --- Sample selection / results (per-sample, decoupled from a single job) ---
@@ -633,16 +552,19 @@ export default function App() {
       handle.close();
       if (eventSourceRef.current === handle) eventSourceRef.current = null;
       setRunning(false);
+      let finalStatus = "";
       fetch(`./api/jobs/${id}`)
         .then((r) => r.json())
         .then((job) => {
+          finalStatus = job.status;
           setJobStatus(job.status);
           setCurrentStep("");
           results.reload();  // the finished sample lands in Kraken Results
           loadProjects();    // refresh kraken_runs badges
+          setInputsRefresh((n) => n + 1);  // parsed reads / downloads change download/
         })
         .catch(() => {})
-        .finally(() => done());
+        .finally(() => done(finalStatus));
     };
     const tick = () => {
       if (finished) return;
@@ -865,20 +787,6 @@ export default function App() {
       {/* Draggable dividers for every two-pane row on the page (see
           SplitPane.jsx). One element, no per-row wiring. */}
       <PaneSplitters />
-      {/* Single hidden file input shared by every project's "Choose files".
-          uploadProjRef tracks which project the dialog was opened for. */}
-      <input
-        ref={uploadInputRef}
-        type="file"
-        multiple
-        accept=".fastq.gz,application/gzip"
-        style={{ display: "none" }}
-        onChange={(e) => {
-          const files = Array.from(e.target.files);
-          e.target.value = "";
-          if (uploadProjRef.current) uploadFiles(uploadProjRef.current, files);
-        }}
-      />
       {/* ── Header ─────────────────────────────────────────────── */}
       <header className="app-header">
         <div className="app-brand">
@@ -937,7 +845,7 @@ export default function App() {
             </span>
           </div>
           <div className="status-item">
-            <span className="status-label">Target Taxon</span>
+            <span className="status-label">Target name</span>
             <span className="status-value">{taxon.trim() || "—"}</span>
           </div>
           <div className="status-item">
@@ -1089,7 +997,7 @@ export default function App() {
         {/* SECTION: Projects & Samples                             */}
         {/* ════════════════════════════════════════════════════════ */}
         <div className="row-header">
-          <h2>Projects &amp; Samples</h2>
+          <h2>Projects &amp; Inputs</h2>
           <button className="ghost" onClick={() => setShowProjects(!showProjects)}>
             {showProjects ? "Hide" : "Show"}
           </button>
@@ -1097,12 +1005,11 @@ export default function App() {
         {showProjects && (
           <div className="row-grid row-grid-split">
             {/* LEFT — project / sample browser */}
-            <section className="panel">
-              <div className="panel-header">
+            <section className={panes.paneClass("panel", "projects")}>
+              <div className="pane-head">
                 <h2>Projects</h2>
-                <div className="panel-actions">
-                  <button className="ghost action" onClick={loadProjects}>↻ Refresh</button>
-                </div>
+                <button className="ghost action small" onClick={loadProjects}>↻ Refresh</button>
+                {panes.expandButton("projects", "the Projects pane")}
               </div>
               <div className="row">
                 <input
@@ -1158,7 +1065,7 @@ export default function App() {
                         {!samples[proj.name] && <div className="loading-text">Loading samples…</div>}
                         {samples[proj.name]?.length === 0 && (
                           <div className="empty-msg" style={{ paddingLeft: 4 }}>
-                            No FASTQ files yet — add some from the <strong>Inputs</strong> pane on the right.
+                            No reads yet — add some in the <strong>Inputs</strong> pane on the right.
                           </div>
                         )}
                         {(samples[proj.name] || []).length > 0 && (
@@ -1246,7 +1153,7 @@ export default function App() {
                                 disabled={running || (!krakenOnly && !taxon.trim())}
                                 onClick={() => runSamples([{ project: proj.name, ...s }])}
                                 title={!krakenOnly && !taxon.trim()
-                                  ? "Enter a target taxon in Run Kraken first (or tick Kraken only)"
+                                  ? "Pick a target name in Run Kraken first (or choose Kraken + Krona only)"
                                   : `Run ${s.sample} now`}
                               >
                                 ▶
@@ -1283,137 +1190,19 @@ export default function App() {
               </div>
             </section>
 
-            {/* RIGHT — Inputs (add samples) + batch selection, stacked */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 20, minWidth: 0 }}>
-              {/* Inputs pane — mirrors vSNP: acts on the active project */}
-              <section className="panel">
-                <div className="panel-header">
-                  <h2>Inputs</h2>
-                  {projects.length > 0 && (
-                    <select
-                      value={activeProject}
-                      onChange={(e) => selectProject(e.target.value)}
-                      title="Project to add FASTQ files to"
-                      style={{ width: "auto", maxWidth: "60%", padding: "6px 10px" }}
-                    >
-                      {projects.map((p) => (
-                        <option key={p.name} value={p.name}>{p.name}</option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-                {!activeProject ? (
-                  <div className="empty-msg">
-                    Create a project first (top of the Projects panel), then import, upload, or download FASTQ files into it.
-                  </div>
-                ) : (
-                  <div className="input-columns">
-                    {/* ── LEFT: Bring Your Own FASTQ ───────────────────────── */}
-                    <div className="input-column">
-                      <h3>Bring Your Own FASTQ</h3>
-
-                      {/* Import from a server path */}
-                      <div className="row" style={{ margin: 0 }}>
-                        <input
-                          placeholder="/path/to/folder or .fastq.gz file"
-                          value={addPath[activeProject] || ""}
-                          onChange={(e) => setAddPath((m) => ({ ...m, [activeProject]: e.target.value }))}
-                          onKeyDown={(e) => { if (e.key === "Enter") linkLocal(activeProject); }}
-                        />
-                        <button className="ghost action" onClick={() => linkLocal(activeProject)} disabled={!(addPath[activeProject] || "").trim()}>Link</button>
-                      </div>
-                      <div className="form-hint">Symlinks every .fastq.gz found — no copying.</div>
-
-                      {/* Upload / drag & drop */}
-                      <div className="block">
-                        <h3>Upload / Drag &amp; Drop</h3>
-                        <div
-                          className="dropzone"
-                          onDragOver={(e) => e.preventDefault()}
-                          onDrop={(e) => { e.preventDefault(); uploadFiles(activeProject, e.dataTransfer.files); }}
-                        >
-                          <button type="button" onClick={() => pickFiles(activeProject)}>Choose Files</button>
-                          <span className="drop-hint">Or drop FASTQ.GZ files here</span>
-                        </div>
-                        {addStatus[activeProject] && <div className="note" style={{ marginBottom: 0 }}>{addStatus[activeProject]}</div>}
-                      </div>
-
-                      {/* Files already in download/ */}
-                      {inputsByProj[activeProject]?.files?.length > 0 && (
-                        <div className="block">
-                          <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ flex: 1 }}>
-                              Files in download/
-                              <span className="muted" style={{ marginLeft: 6, fontWeight: 400, fontSize: 12 }}>
-                                ({inputsByProj[activeProject].count}, {fmtSize(inputsByProj[activeProject].total_bytes)})
-                              </span>
-                            </span>
-                            <button className="ghost" style={{ fontSize: 11, padding: "2px 8px" }} onClick={() => loadInputs(activeProject)} title="Refresh">Refresh</button>
-                          </h3>
-                          <div className="input-files">
-                            {inputsByProj[activeProject].files.map((f) => (
-                              <div key={f.name} className="input-file-row">
-                                <span className="file-name" title={f.name} style={{ flex: 1 }}>{f.name}</span>
-                                <span className="file-size">{fmtSize(f.size)}</span>
-                                <button className="ghost" style={{ fontSize: 11, padding: "2px 7px" }} title="Remove from download/" onClick={() => deleteInput(activeProject, f.name)}>✕</button>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* ── RIGHT: SRA Download ──────────────────────────────── */}
-                    <div className="input-column">
-                      <h3>SRA Download</h3>
-                      <textarea
-                        rows={6}
-                        placeholder={"SRR/ERR/DRR or SRX/SRS/PRJNA accessions\n(one per line)"}
-                        value={sraText[activeProject] || ""}
-                        onChange={(e) => setSraText((m) => ({ ...m, [activeProject]: e.target.value }))}
-                        style={{ resize: "vertical", fontFamily: "inherit" }}
-                      />
-                      <button
-                        style={{ width: "100%" }}
-                        onClick={() => sraDownload(activeProject)}
-                        disabled={!parseAccessions(sraText[activeProject]).length || running}
-                      >
-                        Download{parseAccessions(sraText[activeProject]).length ? ` (${parseAccessions(sraText[activeProject]).length})` : ""}
-                      </button>
-                      <div className="form-hint">Runs in the background; progress appears in the Pipeline Log.</div>
-                    </div>
-                  </div>
-                )}
-              </section>
-
-              {/* Batch selection pane */}
-              <section className="panel">
-                <div className="panel-header">
-                  <h2>Selected for run</h2>
-                  {Object.keys(checkedKeys).length > 0 && (
-                    <button className="ghost action" onClick={() => setCheckedKeys({})}>Clear</button>
-                  )}
-                </div>
-                {Object.keys(checkedKeys).length === 0 ? (
-                  <div className="empty-msg">
-                    Check one or more samples on the left, then run them as a batch from “Run Kraken &amp; Results” below.
-                    Click a sample’s name to find it in the Kraken Results table.
-                  </div>
-                ) : (
-                  <div className="selection-box">
-                    <div className="sel-title">{Object.keys(checkedKeys).length} sample(s) queued</div>
-                    {Object.entries(checkedKeys).map(([key, samp]) => (
-                      <div key={key} className="sel-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span className="sel-name" style={{ flex: 1 }}>{samp.sample}</span>
-                        <span className="muted" style={{ fontSize: 11 }}>{samp.project}</span>
-                        <button className="ghost" style={{ fontSize: 11 }}
-                                onClick={() => toggleChecked(samp.project, samp)} title="Remove from batch">✕</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-            </div>
+            {/* RIGHT — Inputs: the same pane, with the same options, as the
+                vSNP GUI's (see InputsPane.jsx). */}
+            <InputsPane
+              project={activeProject}
+              projects={projects}
+              onSelectProject={selectProject}
+              onInputsChanged={onInputsChanged}
+              onSraJob={followSraJob}
+              sraBlocked={running}
+              refreshKey={inputsRefresh}
+              paneClass={panes.paneClass}
+              expandButton={panes.expandButton}
+            />
           </div>
         )}
 
@@ -1433,6 +1222,8 @@ export default function App() {
             <section className="panel run-panel">
               <h2>Configure &amp; Run</h2>
 
+              <div className="run-cols">
+              <div className="run-col">
               <div className="form-section">
                 <label className="form-label">Run mode</label>
                 {[
@@ -1463,17 +1254,17 @@ export default function App() {
               </div>
 
               <div className="form-section">
-                <label className="form-label">Target Taxon</label>
-                <select
+                <label className="form-label">
+                  Target name
+                  {krakenOnly && <span className="muted" style={{ fontWeight: 400, marginLeft: 6 }}>— not used by Kraken + Krona only</span>}
+                </label>
+                <TargetNamePicker
                   value={taxon}
-                  onChange={(e) => setTaxon(e.target.value)}
+                  onChange={setTaxon}
                   disabled={running || krakenOnly}
-                >
-                  <option value="">Select a target taxon…</option>
-                  {taxonPresets.map((p) => (
-                    <option key={p} value={p}>{p}</option>
-                  ))}
-                </select>
+                  project={activeProject}
+                  store={targetNames}
+                />
                 {!krakenOnly && isOrbivirusBeta(taxon) && (
                   <div className="beta-warning" role="alert">
                     <strong>BETA — Orbivirus (BTV/EHD) analysis is untested.</strong>{" "}
@@ -1483,29 +1274,10 @@ export default function App() {
                     them by a validated method before acting on them.
                   </div>
                 )}
-                <div className="add-taxon-row" style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                  <input
-                    placeholder="Add a new taxon to the list…"
-                    value={newTaxon}
-                    onChange={(e) => setNewTaxon(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTaxon(); } }}
-                    disabled={running || addingTaxon}
-                    style={{ flex: 1 }}
-                  />
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={addTaxon}
-                    disabled={running || addingTaxon || !newTaxon.trim()}
-                  >
-                    {addingTaxon ? "Adding…" : "+ Add"}
-                  </button>
-                </div>
-                <div className="note" style={{ marginTop: 4 }}>
-                  New taxa are saved to the shared list (this install’s config/taxa.yaml) and appear in this dropdown and the vSNP GUI.
-                </div>
               </div>
 
+              </div>
+              <div className="run-col">
               <div className="form-section">
                 <label className="form-label">
                   Kraken2 DB path
@@ -1559,6 +1331,31 @@ export default function App() {
                 />
               </div>
 
+              <div className="form-section">
+                <label className="form-label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ flex: 1 }}>Selected for run</span>
+                  {Object.keys(checkedKeys).length > 0 && (
+                    <button className="ghost small" onClick={() => setCheckedKeys({})} disabled={running}>Clear</button>
+                  )}
+                </label>
+                {Object.keys(checkedKeys).length === 0 ? (
+                  <div className="form-hint" style={{ marginTop: 0 }}>
+                    None yet — tick samples in the Projects pane (shift-click selects a range).
+                  </div>
+                ) : (
+                  <div className="selected-list">
+                    {Object.entries(checkedKeys).map(([key, samp]) => (
+                      <span key={key} className="tm-saved-item" title={`${samp.sample} — ${samp.project}`}>
+                        {samp.sample}
+                        {samp.project !== activeProject && <span className="muted"> · {samp.project}</span>}
+                        <button className="chip-remove" onClick={() => toggleChecked(samp.project, samp)}
+                          disabled={running} title="Take this sample out of the run">×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <button
                 className="run-btn"
                 onClick={runSelected}
@@ -1568,11 +1365,8 @@ export default function App() {
                   ? `Running… ${queueInfo.total > 1 ? `(${queueInfo.done}/${queueInfo.total})` : ""}`
                   : `▶ Run selected${Object.keys(checkedKeys).length ? ` (${Object.keys(checkedKeys).length})` : ""}`}
               </button>
-              {Object.keys(checkedKeys).length === 0 && (
-                <div className="note">Check one or more samples in Projects &amp; Samples to enable the run — or use a sample row’s ▶ button.</div>
-              )}
               {!krakenOnly && !taxon.trim() && Object.keys(checkedKeys).length > 0 && (
-                <div className="note">Enter a target taxon above (or tick “Kraken only”) to enable the run.</div>
+                <div className="note">Pick a target name above (or choose “Kraken + Krona only”) to enable the run.</div>
               )}
 
               {/* Live status of the run in flight — the finished sample lands
@@ -1594,6 +1388,8 @@ export default function App() {
                   </div>
                 </div>
               )}
+              </div>
+              </div>
             </section>
 
             {/* RIGHT — every completed sample, searchable (the vSNP Step 1
@@ -1678,6 +1474,8 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {panes.expanded && <div className="pane-backdrop" onClick={() => panes.setExpanded("")} />}
 
       <CitationFooter tool="kraken_id_parse_gui" />
 

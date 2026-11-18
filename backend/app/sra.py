@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -83,6 +84,11 @@ def expand_accessions_with_mapping(
         acc = acc.strip()
         if not acc:
             continue
+        if not is_valid_accession(acc):
+            raise SRAExpansionError(
+                f"{acc!r} is not a valid accession (letters, digits, dot, "
+                "underscore and hyphen only)"
+            )
         if acc.startswith(("SRR", "ERR", "DRR")):
             expanded.append(acc)
             mapping.append((acc, [acc]))
@@ -119,6 +125,18 @@ def write_crosswalk_tsv(download_dir: Path, mapping: List[tuple[str, List[str]]]
     return crosswalk_path
 
 
+# An SRA/ENA/DDBJ accession as it may appear in a generated shell script.
+# Real values are SRR/ERR/DRR/SRX/SRS/SRP/PRJNA/SAMN + digits; the charset also
+# admits the dot/underscore/hyphen forms NCBI occasionally returns. Anything
+# else is refused rather than quoted, because these values are interpolated into
+# a bash array literal inside DOUBLE quotes, where $(...) and `...` expand.
+_SRA_ACC_RE = re.compile(r"^[A-Za-z0-9._-]{3,64}$")
+
+
+def is_valid_accession(acc: str) -> bool:
+    return bool(_SRA_ACC_RE.match((acc or "").strip()))
+
+
 def _expand_single(accession: str) -> List[str]:
     try:
         xml_data = _eutils_get(
@@ -151,19 +169,48 @@ def build_download_script(
     accessions: List[str],
     allow_insecure_https: bool,
     concurrency: int = 4,
+    step1_dir: Path | None = None,
+    report_path: Path | None = None,
 ) -> str:
     """Generate a bash script that downloads each accession via xargs -P
     parallelism. concurrency caps simultaneous workers — past ~4-6 NCBI's
     per-IP S3 throttling and the local fasterq-dump CPU/disk start to bite,
-    so 4 is the documented sweet spot."""
+    so 4 is the documented sweet spot.
+
+    step1_dir is the project's step1/ folder. When given, an accession that has
+    already been aligned there is skipped (and reported as such) instead of being
+    re-fetched over the network — Step 1 keeps its own copy of the reads, so the
+    download/ copy can be gone while the sample is fully processed.
+
+    report_path, when given, is a TSV the script (over)writes at the end with one
+    ``outcome<TAB>accession`` row per accession (downloaded / already_in_step1 /
+    failed). It's the persistent, machine-readable record of the last download so
+    the UI can show which accessions were skipped-because-already-run without the
+    user having to scroll the live log — the point being that with hundreds of
+    samples a skipped one leaves no other on-screen trace."""
     curl_insecure = "-k" if allow_insecure_https else ""
     concurrency = max(1, int(concurrency))
+    # Re-validated at the interpolation site itself: accessions also arrive from
+    # eutils XML, and this is the line that becomes shell.
+    for _a in accessions:
+        if not is_valid_accession(_a):
+            raise SRAExpansionError(f"refusing to build a download script for {_a!r}")
     acc_block = "\n".join([f'    "{a}"' for a in accessions])
+    # Empty string disables the Step 1 skip check (older callers / no project).
+    step1_dir_str = str(step1_dir) if step1_dir is not None else ""
+    # Empty string disables report writing (older callers / no project).
+    report_path_str = str(report_path) if report_path is not None else ""
 
     return f"""#!/bin/bash
 set -u
 
 cd "{download_dir}"
+
+# Project's step1/ folder (empty = skip check disabled). Used by
+# already_in_step1 to avoid re-downloading a sample that's already been aligned.
+STEP1_DIR="{step1_dir_str}"
+# Persistent per-accession outcome report (empty = disabled).
+REPORT_PATH="{report_path_str}"
 
 # ── Tool detection ──────────────────────────────────────────────
 HAS_WGET=0; HAS_FASTERQ=0; HAS_ENADATAGET=0; HAS_CURL=0; HAS_PIGZ=0
@@ -191,6 +238,14 @@ if command -v curl >/dev/null 2>&1; then
 else
   echo "[MISSING] curl — Method 3 (ENA HTTPS/FTP) will be skipped"
 fi
+# ENA answers some file requests with 403 under load, and plain --retry does
+# not retry an HTTP error. --retry-all-errors does, where this curl has it
+# (7.71+; an older curl rejects the option outright, so it is only added
+# when the help text lists it).
+CURL_RETRY="--retry 3 --retry-delay 5"
+if [ "$HAS_CURL" -eq 1 ] && curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+  CURL_RETRY="$CURL_RETRY --retry-all-errors"
+fi
 
 if command -v pigz >/dev/null 2>&1; then
   HAS_PIGZ=1; echo "[OK] pigz found (fast compression)"
@@ -215,12 +270,38 @@ echo ""
 
 already_have() {{
   local acc="$1"
-  # Check for paired-end files
-  if ls "${{acc}}"_1.fastq.gz "${{acc}}"_2.fastq.gz 2>/dev/null | head -1 | grep -q .; then
+  # A pair counts only when BOTH mates are here. ENA can serve one mate and
+  # refuse the other, and a lone mate used to count as "have": pressing
+  # Download again then skipped the sample, and it went on to Step 1 as half
+  # of a pair.
+  if [ -f "${{acc}}_1.fastq.gz" ] && [ -f "${{acc}}_2.fastq.gz" ]; then
     return 0
+  fi
+  if [ -f "${{acc}}_1.fastq.gz" ] || [ -f "${{acc}}_2.fastq.gz" ]; then
+    return 1
   fi
   # Check for single-end file
   if [ -f "${{acc}}.fastq.gz" ]; then
+    return 0
+  fi
+  return 1
+}}
+
+# True if this accession has already been ALIGNED in the project's Step 1.
+# Mirrors the backend's own "run" signal (main.py step1_status): the per-sample
+# .provenance/exit_code sentinel written as 0 on success, or — for legacy
+# projects predating the sentinel — a finished alignment's *_nodup.bam. Reads
+# staged into step1/ but not yet aligned do NOT count, so a sample you set up
+# but never ran can still be (re)fetched.
+already_in_step1() {{
+  local acc="$1"
+  [ -n "$STEP1_DIR" ] || return 1
+  local d="$STEP1_DIR/$acc"
+  [ -d "$d" ] || return 1
+  if [ -f "$d/.provenance/exit_code" ] && [ "$(cat "$d/.provenance/exit_code" 2>/dev/null)" = "0" ]; then
+    return 0
+  fi
+  if ls "$d"/alignment_*/*_nodup.bam >/dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -305,10 +386,26 @@ method3() {{
 
   echo "  [Method 3] ENA curl"
   local api_url="https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${{acc}}&result=read_run&fields=fastq_ftp"
-  local urls
-  urls=$(curl -s {curl_insecure} "$api_url" | tail -n1 | cut -f2)
+  # This is the only method a laptop has (no sra-tools there), so one bad
+  # answer must not cost the sample. The portal sometimes replies with an error
+  # line instead of the table ("ERROR occurred. Not all results may have been
+  # written."), and taking the last line as the file list turned that message
+  # into a "URL" and failed the accession. Read only this run's row, and ask
+  # again before giving up.
+  local urls="" attempt
+  for attempt in 1 2 3 4; do
+    urls=$(curl -s {curl_insecure} "$api_url" | awk -F'\\t' -v a="$acc" '$1 == a {{print $2; exit}}')
+    case "$urls" in
+      *fastq*) break ;;
+    esac
+    urls=""
+    if [ "$attempt" -lt 4 ]; then
+      echo "  [Method 3] ENA gave no file list for $acc (try $attempt of 4) — asking again"
+      sleep $((attempt * 5))
+    fi
+  done
 
-  if [ -z "$urls" ] || [ "$urls" = "fastq_ftp" ]; then
+  if [ -z "$urls" ]; then
     echo "  [Method 3] ENA did not return URLs for $acc"
     return 1
   fi
@@ -319,10 +416,11 @@ method3() {{
     local filename
     filename=$(basename "$url")
     echo "  Downloading $filename"
-    # Try HTTPS first, then FTP
-    if curl -f {curl_insecure} "https://$url" -o "$filename" 2>&1; then
+    # Try HTTPS first, then FTP. The retries cover the transient errors a
+    # 26-sample batch reliably meets somewhere (CURL_RETRY, set above).
+    if curl -f ${{CURL_RETRY:---retry 3 --retry-delay 5}} {curl_insecure} "https://$url" -o "$filename" 2>&1; then
       echo "  [OK] $filename downloaded via HTTPS"
-    elif curl -f {curl_insecure} "ftp://$url" -o "$filename" 2>&1; then
+    elif curl -f ${{CURL_RETRY:---retry 3 --retry-delay 5}} {curl_insecure} "ftp://$url" -o "$filename" 2>&1; then
       echo "  [OK] $filename downloaded via FTP"
     else
       echo "  [FAILED] Could not download $filename"
@@ -331,7 +429,12 @@ method3() {{
     fi
   done
 
-  if [ "$all_ok" -eq 0 ]; then return 1; fi
+  if [ "$all_ok" -eq 0 ]; then
+    # Never leave half of a pair behind: a lone mate is staged by Grab and
+    # aligned as if it were the whole sample.
+    for url in "${{url_array[@]}}"; do rm -f "$(basename "$url")"; done
+    return 1
+  fi
   return 0
 }}
 
@@ -341,8 +444,17 @@ download_one() {{
   local acc="$1"
   echo "── $acc ──"
 
+  # Already processed in this project — don't re-fetch over the network. Step 1
+  # keeps its own copy of the reads, so download/ can be empty while the sample
+  # is done. Reported separately in the summary so the user knows why it's here.
+  if already_in_step1 "$acc"; then
+    echo "  [$acc] already aligned in Step 1 for this project — skipping (reads in step1/$acc; no re-download)"
+    echo "skip_step1" > ".status_${{acc}}"
+    return 0
+  fi
+
   if already_have "$acc"; then
-    echo "  [$acc] Already have reads, skipping"
+    echo "  [$acc] Already have reads in download/, skipping"
     echo "ok" > ".status_${{acc}}"
     return 0
   fi
@@ -365,9 +477,10 @@ download_one() {{
 }}
 
 # xargs subshells need our functions and the HAS_*/CAN_* state.
-export -f download_one already_have compress_fastqs method1 method2 method3
-export HAS_WGET HAS_FASTERQ HAS_ENADATAGET HAS_CURL HAS_PIGZ
+export -f download_one already_have already_in_step1 compress_fastqs method1 method2 method3
+export HAS_WGET HAS_FASTERQ HAS_ENADATAGET HAS_CURL HAS_PIGZ CURL_RETRY
 export CAN_METHOD1 CAN_METHOD2 CAN_METHOD3
+export STEP1_DIR
 
 # ── Main download loop (parallel via xargs -P) ────────────────
 
@@ -393,12 +506,31 @@ printf '%s\n' "${{ACCESSIONS[@]}}" | \
 SUCCEEDED=0
 FAILED_COUNT=0
 FAILED_LIST=""
+SKIPPED_STEP1=0
+SKIPPED_LIST=""
+# Fresh report each run: it records THIS download's outcomes, so the UI's
+# "Last download" summary reflects the most recent action, not an accumulation.
+if [ -n "$REPORT_PATH" ]; then
+  : > "$REPORT_PATH"
+  printf '# Last SRA download outcome — regenerated each download.\n' >> "$REPORT_PATH"
+  printf '# outcome\taccession  (outcome in: downloaded, already_in_step1, failed)\n' >> "$REPORT_PATH"
+fi
 for acc in "${{ACCESSIONS[@]}}"; do
-  if [ -f ".status_${{acc}}" ] && [ "$(cat ".status_${{acc}}")" = "ok" ]; then
+  status="$(cat ".status_${{acc}}" 2>/dev/null)"
+  if [ "$status" = "ok" ]; then
     SUCCEEDED=$((SUCCEEDED + 1))
+    outcome="downloaded"
+  elif [ "$status" = "skip_step1" ]; then
+    SKIPPED_STEP1=$((SKIPPED_STEP1 + 1))
+    SKIPPED_LIST="$SKIPPED_LIST $acc"
+    outcome="already_in_step1"
   else
     FAILED_COUNT=$((FAILED_COUNT + 1))
     FAILED_LIST="$FAILED_LIST $acc"
+    outcome="failed"
+  fi
+  if [ -n "$REPORT_PATH" ]; then
+    printf '%s\t%s\n' "$outcome" "$acc" >> "$REPORT_PATH"
   fi
   rm -f ".status_${{acc}}"
 done
@@ -409,6 +541,10 @@ echo ""
 echo "== Summary =="
 echo "Succeeded: $SUCCEEDED / ${{#ACCESSIONS[@]}}"
 
+if [ "$SKIPPED_STEP1" -gt 0 ]; then
+  echo "Skipped (already aligned in Step 1, not re-downloaded):$SKIPPED_LIST"
+fi
+
 if [ "$FAILED_COUNT" -gt 0 ]; then
   echo "[FAILED] Failed accessions:$FAILED_LIST"
 fi
@@ -416,11 +552,15 @@ fi
 if ls *.fastq.gz >/dev/null 2>&1; then
   echo ""; echo "Downloaded files:"
   ls -lh *.fastq.gz
+elif [ "$SUCCEEDED" -eq 0 ] && [ "$SKIPPED_STEP1" -gt 0 ]; then
+  echo "No new files downloaded — every accession was already aligned in Step 1."
 else
   echo "[FAILED] No .fastq.gz files found after download"
 fi
 
-if [ "$FAILED_COUNT" -gt 0 ] && [ "$SUCCEEDED" -eq 0 ]; then
+# Fail the job only if real download attempts failed and nothing else worked;
+# a run where every accession was skipped (already in Step 1) is a success.
+if [ "$FAILED_COUNT" -gt 0 ] && [ "$SUCCEEDED" -eq 0 ] && [ "$SKIPPED_STEP1" -eq 0 ]; then
   exit 1
 fi
 exit 0

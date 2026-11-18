@@ -951,9 +951,38 @@ def api_project_file(name: str, path: str = Query(...), inline: int = 0):
         raise HTTPException(404, f"File not found: {path}")
     media_type = _media_type_for(target.name)
     want_inline = bool(inline) and _can_open_inline(target.name)
+    if want_inline and target.name == "report.html":
+        healed = _report_with_working_links(target)
+        if healed is not None:
+            return HTMLResponse(healed, headers={"Cache-Control": "no-cache"})
     disposition = "inline" if want_inline else "attachment"
     headers = {"Content-Disposition": f'{disposition}; filename="{target.name}"'}
     return FileResponse(target, media_type=media_type, headers=headers)
+
+
+def _report_with_working_links(report: Path) -> Optional[str]:
+    """A report.html written before its Krona link worked when served, rendered
+    again (in memory, nothing written) from the run's manifest; None otherwise.
+
+    v0.2.29 reports linked the Krona chart by a path relative to the run folder,
+    which this endpoint's ?path= URL turned into "Not Found". Reports written
+    since carry the fix (a data-run-file link and the script that rewrites
+    it) and are served exactly as written.
+    """
+    manifest_path = report.parent / "run_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        if b"data-run-file" in report.read_bytes():
+            return None
+        if str(_BIN_DIR) not in sys.path:
+            sys.path.insert(0, str(_BIN_DIR))
+        from reporting.html_renderer import render_html_text
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return render_html_text(manifest, asset_mode="embed", base_dir=report.parent)
+    except Exception as exc:
+        logger.warning("Could not re-render %s: %s", report, exc)
+        return None
 
 
 def _home_short(p: Path) -> str:

@@ -460,7 +460,7 @@
     <tr><th>Reads classified</th><td>{{ kraken.classified_pct|fmt(2, "%") if kraken.classified_pct is not none else "not recorded" }}{% if kraken.total_reads %} of {{ kraken.total_reads|fmt }} {{ "read pairs" if input_names|length == 2 else "reads" }}{% endif %}</td></tr>
     <tr><th>Reads unclassified</th><td>{{ kraken.unclassified_pct|fmt(2, "%") if kraken.unclassified_pct is not none else "not recorded" }}</td></tr>
     {% if krona %}
-      <tr><th>Interactive taxonomy</th><td><a href="{{ file_url(krona.path) }}" target="_blank" rel="noopener">Open the Krona chart</a> <span class="small">&nbsp;{{ krona.path }}</span></td></tr>
+      <tr><th>Interactive taxonomy</th><td><a href="{{ file_url(krona.path) }}" data-run-file="{{ krona.path }}" target="_blank" rel="noopener">Open the Krona chart</a> <span class="small">&nbsp;{{ krona.path }}</span></td></tr>
     {% endif %}
   </tbody>
 </table>
@@ -671,5 +671,28 @@
 
 </div>
 </div>
+{# Links to the run's other files (the Krona chart) are relative to the run
+   folder. That is right when report.html is opened from disk or a path-style
+   URL (the OOD Files app). Both GUIs serve it as <endpoint>?path=<run>/report.html
+   instead, where the relative link resolved to a route that does not exist
+   ("Not Found"). There, point each link at the same endpoint with
+   path=<run>/<file>; the GUI's own path checks still apply. #}
+<script>
+(function () {
+  var params = new URLSearchParams(window.location.search);
+  var self = params.get("path");
+  if (!self || !/report\.html$/.test(self)) return;
+  var dir = self.replace(/[^\/]*$/, "");
+  var links = document.querySelectorAll("a[data-run-file]");
+  for (var i = 0; i < links.length; i++) {
+    var rel = links[i].getAttribute("data-run-file") || "";
+    var q = new URLSearchParams(params.toString());
+    q.set("path", rel.charAt(0) === "/" ? rel : dir + rel);
+    q.set("inline", "1");
+    q.delete("download_name");
+    links[i].href = window.location.pathname + "?" + q.toString();
+  }
+})();
+</script>
 </body>
 </html>

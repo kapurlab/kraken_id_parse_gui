@@ -228,6 +228,13 @@ def main() -> int:
     check("api: images are served by the GUI", 'src="./file?path=bracken_pie.png&amp;inline=1"' in api)
     check("api: Krona link served by the GUI", 'href="./file?path=kraken/SAMPLE-A_2026_krona.html&amp;inline=1"' in api)
     check("embed: Krona link stays relative to the run folder", 'href="kraken/SAMPLE-A_2026_krona.html"' in emb)
+    # Served by a GUI as <endpoint>?path=<run>/report.html, the relative link
+    # resolved to a route that does not exist; the page rewrites it (the live
+    # behaviour is checked in a browser, this pins that the pieces are there).
+    check("embed: the Krona link names its run file for the rewrite",
+          'data-run-file="kraken/SAMPLE-A_2026_krona.html"' in emb)
+    check("embed: the rewrite script is in the page",
+          'querySelectorAll("a[data-run-file]")' in emb and 'params.get("path")' in emb)
 
     print("Needs attention")
     bad = manifest("full", status="completed_with_warnings",
